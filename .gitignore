@@ -1,0 +1,27 @@
+# Data is gitignored per the build spec (StatsBomb raw pulls + caches).
+# A small cached shots_model.rds may optionally be committed for reproducibility,
+# but by default the whole data dir is excluded.
+data/
+!data/.gitkeep
+
+# R / session
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+*.Rproj
+
+# rendered report artifacts
+analysis/*_files/
+analysis/*.html
+/*_cache/
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# secrets (none expected; defensive)
+*.env
+.env*

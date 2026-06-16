@@ -1,0 +1,137 @@
+---
+title: "xG From Scratch & the Finishing-Skill Question"
+subtitle: "Calibrated probabilistic prediction on StatsBomb Open Data"
+author: "Alejandro Izaguirre"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 2
+    code-fold: true
+    df-print: kable
+    embed-resources: true
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r setup}
+library(dplyr)
+source(here::here("R", "utils.R"))
+rd  <- function(f) readRDS(here::here("data", f))
+fig <- function(f) here::here("figures", f)
+shots <- rd("shots_model.rds")
+```
+
+## Data & exclusions
+
+StatsBomb Open Data (event + freeze-frame), pulled as raw JSON. Shots are the
+unit of analysis. **Penalties are excluded** (a different process); direct free
+kicks are kept but flagged. `shot_statsbomb_xg` is retained purely as a
+benchmark and is **never** a feature.
+
+```{r data-summary}
+tibble::tibble(
+  shots = nrow(shots),
+  goals = sum(shots$is_goal),
+  base_rate = round(mean(shots$is_goal), 3),
+  players = dplyr::n_distinct(shots$player_id),
+  matches = dplyr::n_distinct(shots$match_id),
+  competitions = dplyr::n_distinct(shots$competition)
+)
+```
+
+Class balance by competition:
+
+```{r balance}
+rd("eda_balance.rds")
+```
+
+## EDA
+
+The visual hook — goal rate over pitch location — plus the empirical goal-rate
+curves against the two dominant geometric features.
+
+![Goal rate by shot location](`r fig("shot_map.png")`)
+
+![Goal rate vs distance](`r fig("goalrate_distance.png")`){width=70%}
+![Goal rate vs angle](`r fig("goalrate_angle.png")`){width=70%}
+
+## Models & leakage discipline
+
+Three models on **identical match-grouped CV folds** (shots from one match never
+span train/test), with out-of-fold predictions for every shot:
+
+- **A — logistic**: `distance + angle + body part` (interpretable baseline).
+- **B — GAM**: `mgcv` 2-D spatial smooth `s(x, y)` + context terms.
+- **C — xgboost**: full feature set, `nrounds` chosen by inner CV.
+
+```{r leaderboard}
+rd("model_leaderboard.rds")
+```
+
+## Calibration & benchmark vs StatsBomb
+
+Great ranking is not enough — predicted probabilities must be **calibrated**.
+Reliability diagram (out-of-fold), with ECE and the Murphy/Brier decomposition.
+
+![Reliability diagram (out-of-fold)](`r fig("reliability.png")`){width=70%}
+
+```{r calib}
+rd("calibration_scores.rds")
+```
+
+If the GBM is miscalibrated, leakage-safe isotonic recalibration (fit on other
+folds, applied out-of-fold):
+
+```{r recal}
+rd("recalibration.rds")
+```
+
+**Framing:** the question is "how close can open features get to a production
+model," not "I beat StatsBomb." The gap to `statsbomb_xg` is reported honestly
+above.
+
+## Finishing skill: real or regression to the mean?
+
+Per-player goals-above-xG, then a hierarchical shrinkage model
+(`glmer`, player random intercept, model-xG as a logit-scale offset). Low-volume
+players are pulled toward zero.
+
+![Shrinkage](`r fig("shrinkage.png")`){width=75%}
+
+Top finishers by **shrunken** skill (with 95% intervals):
+
+```{r leaderboard-skill}
+head(rd("finishing_leaderboard.rds"), 10)
+```
+
+Split-half persistence test (odd/even shots; permutation null):
+
+```{r persistence}
+p <- rd("finishing_persistence.rds")
+p
+```
+
+```{r verdict, results='asis'}
+cat(sprintf(
+  "**Verdict:** across %d players, split-half correlation of finishing over-performance is r = %.3f (permutation p = %.3f). %s\n",
+  p$n_players, p$split_half_r, p$perm_p,
+  if (p$perm_p < 0.05) "Some signal persists, but most raw over-performance is noise that shrinks heavily." else "We cannot reject that finishing over-performance in this sample is mostly noise."))
+```
+
+## Limitations
+
+- **Selection bias**: open data skews toward elite competitions; finishing
+  estimates may not transfer to lower levels.
+- **No tracking data**: freeze frames are a snapshot at shot moment, not full
+  positioning; defender/GK features are approximations.
+- **Sample size**: the finishing-skill verdict is bounded by shots-per-player;
+  the shrinkage and persistence results are about *this* sample.
+- `statsbomb_xg` is a black box we benchmark against, not ground truth.
+
+::: {.callout-note}
+StatsBomb data is free for non-commercial use. Attribution: data provided by
+StatsBomb (https://github.com/statsbomb/open-data).
+:::
