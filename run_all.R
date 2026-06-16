@@ -18,37 +18,29 @@ options(stringsAsFactors = FALSE)
 stopifnot(file.exists("R/utils.R"))
 source("R/utils.R")
 
-run_tests <- function() {
-  if (requireNamespace("testthat", quietly = TRUE)) {
-    message("== Phase 0: unit tests ==")
-    res <- testthat::test_dir("tests", reporter = "summary", stop_on_failure = TRUE)
-  }
+# Each phase script defines its function(s) and only auto-runs when executed
+# standalone (sys.nframe()==0). Sourcing here just loads the functions; we call
+# each one explicitly, so every phase runs exactly once.
+for (f in sprintf("R/%s", c("00_ingest.R", "01_features.R", "02_eda.R",
+                            "03_models.R", "04_calibration.R", "05_finishing_skill.R")))
+  source(f)
+
+# Phase 0: unit tests (fail fast on a broken helper)
+if (requireNamespace("testthat", quietly = TRUE)) {
+  message("== Phase 0: unit tests ==")
+  testthat::test_dir("tests", reporter = "summary", stop_on_failure = TRUE)
 }
 
-phase <- function(label, file, fn) {
-  message("\n== ", label, " ==")
-  source(file, local = new.env())
-  fn()
-}
+# Phase 1: ingest (cached -> skip) + features
+if (!file.exists("data/shots_raw.rds") || identical(Sys.getenv("XG_FORCE_INGEST"), "1")) {
+  message("== Phase 1a: ingest =="); ingest_shots()
+} else message("Phase 1a: data/shots_raw.rds exists; skipping ingest.")
+message("== Phase 1b: features =="); build_features()
 
-run_tests()
-
-# Phase 1: ingest (cached) + features
-source("R/00_ingest.R", local = TRUE)   # auto-skips if cache exists
-source("R/01_features.R", local = TRUE)
-build_features()
-
-# Phase 2: EDA
-source("R/02_eda.R", local = TRUE); run_eda()
-
-# Phase 3: models (grouped CV, OOF preds)
-source("R/03_models.R", local = TRUE); run_models()
-
-# Phase 4: calibration + benchmark
-source("R/04_calibration.R", local = TRUE); run_calibration()
-
-# Phase 5: finishing skill
-source("R/05_finishing_skill.R", local = TRUE); run_finishing()
+message("== Phase 2: EDA ==");          run_eda()
+message("== Phase 3: models ==");       run_models()
+message("== Phase 4: calibration =="); run_calibration()
+message("== Phase 5: finishing ==");    run_finishing()
 
 message("\nPipeline complete. Figures in figures/, tables in data/*.rds.")
 message("Render the report with:  quarto render analysis/report.qmd")

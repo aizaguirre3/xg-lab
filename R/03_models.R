@@ -60,7 +60,12 @@ fit_predict_fold <- function(train, test) {
   set.seed(SEED)
   cv <- xgb.cv(params, dtrain, nrounds = 600, nfold = 4,
                early_stopping_rounds = 30, verbose = 0)
+  # xgboost >= 3 leaves cv$best_iteration empty; derive it from the eval log.
   best <- cv$best_iteration
+  if (is.null(best) || length(best) == 0 || is.na(best)) {
+    best <- which.min(cv$evaluation_log$test_logloss_mean)
+  }
+  best <- max(as.integer(best), 1L)
   m_xgb <- xgb.train(params, dtrain, nrounds = best, verbose = 0)
   p_xgb <- predict(m_xgb, dtest)
 
@@ -113,4 +118,4 @@ run_models <- function(in_path  = file.path("data", "shots_model.rds"),
   invisible(oof)
 }
 
-if (sys.nframe() == 0 || identical(environment(), globalenv())) run_models()
+if (sys.nframe() == 0) run_models()

@@ -96,4 +96,4 @@ run_finishing <- function(in_path = file.path("data", "oof_preds.rds")) {
   invisible(list(shrunk = shrunk, persistence = persistence))
 }
 
-if (sys.nframe() == 0 || identical(environment(), globalenv())) run_finishing()
+if (sys.nframe() == 0) run_finishing()

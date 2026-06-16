@@ -20,7 +20,7 @@ execute:
 library(dplyr)
 source(here::here("R", "utils.R"))
 rd  <- function(f) readRDS(here::here("data", f))
-fig <- function(f) here::here("figures", f)
+fig <- function(f) file.path("..", "figures", f)   # relative to the .qmd, so it embeds
 shots <- rd("shots_model.rds")
 ```
 
@@ -32,13 +32,14 @@ kicks are kept but flagged. `shot_statsbomb_xg` is retained purely as a
 benchmark and is **never** a feature.
 
 ```{r data-summary}
+s <- shots   # alias so the `shots` column below doesn't shadow the data frame
 tibble::tibble(
-  shots = nrow(shots),
-  goals = sum(shots$is_goal),
-  base_rate = round(mean(shots$is_goal), 3),
-  players = dplyr::n_distinct(shots$player_id),
-  matches = dplyr::n_distinct(shots$match_id),
-  competitions = dplyr::n_distinct(shots$competition)
+  shots = nrow(s),
+  goals = sum(s$is_goal),
+  base_rate = round(mean(s$is_goal), 3),
+  players = dplyr::n_distinct(s$player_id),
+  matches = dplyr::n_distinct(s$match_id),
+  competitions = dplyr::n_distinct(s$competition)
 )
 ```
 

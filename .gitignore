@@ -25,3 +25,6 @@ analysis/*.html
 # secrets (none expected; defensive)
 *.env
 .env*
+
+# keep the final rendered report tracked
+!analysis/report.html

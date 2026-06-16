@@ -107,7 +107,7 @@ ingest_shots <- function(
 }
 
 # Run when sourced directly (the pipeline calls ingest_shots()).
-if (sys.nframe() == 0 || identical(environment(), globalenv())) {
+if (sys.nframe() == 0) {
   if (!file.exists(file.path("data", "shots_raw.rds")) ||
       identical(Sys.getenv("XG_FORCE_INGEST"), "1")) {
     ingest_shots()

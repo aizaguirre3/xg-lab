@@ -93,4 +93,4 @@ run_calibration <- function(in_path = file.path("data", "oof_preds.rds")) {
   invisible(scores)
 }
 
-if (sys.nframe() == 0 || identical(environment(), globalenv())) run_calibration()
+if (sys.nframe() == 0) run_calibration()

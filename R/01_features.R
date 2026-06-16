@@ -142,6 +142,6 @@ build_features <- function(in_path  = file.path("data", "shots_raw.rds"),
   invisible(df)
 }
 
-if (sys.nframe() == 0 || identical(environment(), globalenv())) {
+if (sys.nframe() == 0) {
   build_features()
 }

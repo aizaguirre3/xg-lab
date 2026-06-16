@@ -13,7 +13,51 @@ probabilities be **calibrated**, not merely well-ranked.
 > (`Rscript run_all.R`) after the data pull. Geometry + calibration helpers are
 > unit-tested (`tests/test_utils.R`, hand-computed expected values).
 
-<!-- HEADLINE_RESULTS -->
+## Headline results
+
+Built on **19,887 shots** (2,085 goals, base rate **0.105**) from **800 matches**
+across 6 competitions (StatsBomb Open Data). Penalties excluded.
+
+**Calibration benchmark vs StatsBomb's production xG** (out-of-fold, match-grouped CV):
+
+| Model | Log loss | Brier | ECE |
+|---|---:|---:|---:|
+| StatsBomb xG (benchmark) | 0.2735 | 0.0777 | 0.0065 |
+| **xgboost (ours)** | **0.2758** | 0.0789 | **0.0032** |
+| GAM (mgcv `s(x,y)`) | 0.2832 | 0.0801 | 0.0029 |
+| logistic baseline | 0.2940 | 0.0840 | 0.0067 |
+
+Our best model lands **within 0.0023 log loss of StatsBomb's production xG** using
+only open features — and is *better calibrated* by ECE. Model ordering is the
+expected xgboost ≤ GAM ≤ logistic. (We are benchmarking against a black box, not
+claiming to beat it.)
+
+**Finishing skill — real or regression to the mean?** Among **79 players with ≥40
+shots**, the split-half persistence correlation of goals-above-xG is **r = 0.213
+(permutation p = 0.055)**. Verdict: finishing over-performance is *mostly* noise
+that the shrinkage model pulls toward zero, with at most a small persistent
+signal that does not clearly clear significance in this sample — exactly the
+skill-vs-luck story the project sets out to test honestly.
+
+📄 Full technical write-up: [`analysis/report.html`](analysis/report.html)
+(open the rendered HTML, or re-render with `quarto render analysis/report.qmd`).
+
+### Three figures that tell the story
+
+Goal rate by shot location — the visual hook:
+
+![Shot map](figures/shot_map.png)
+
+Reliability diagram (out-of-fold): our xgboost sits on the diagonal, alongside
+StatsBomb's xG.
+
+![Reliability diagram](figures/reliability.png)
+
+Shrinkage pulls low-volume "great finishers" back toward zero:
+
+![Shrinkage](figures/shrinkage.png)
+
+
 
 ## What's here
 

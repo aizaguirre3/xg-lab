@@ -67,4 +67,4 @@ run_eda <- function(in_path = file.path("data", "shots_model.rds")) {
   invisible(bal)
 }
 
-if (sys.nframe() == 0 || identical(environment(), globalenv())) run_eda()
+if (sys.nframe() == 0) run_eda()
