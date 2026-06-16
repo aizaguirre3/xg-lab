@@ -28,3 +28,6 @@ analysis/*.html
 
 # keep the final rendered report tracked
 !analysis/report.html
+
+# exported CSVs for Snowflake load (reproducible from the pipeline)
+snowflake/*.csv
