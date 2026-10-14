@@ -95,44 +95,60 @@ run_offside_360 <- function(in_path = file.path("data", "pass_frames.rds")) {
     agreement_row(dd %>% filter(keeper_opp_in_frame), "opposing keeper in frame (furthest-forward)", "margin_max"))
 
   # ---- psychometric fit: P(call | margin), probit ---------------------------------
-  fit <- glm(offside_call ~ margin_near, data = dd, family = binomial(link = "probit"))
-  slope <- coef(fit)[["margin_near"]]; sigma_eff <- 1 / slope; pse <- -coef(fit)[[1]] / slope
-  set.seed(SEED)
-  ms <- unique(dd$match_id); idx_by_m <- split(seq_len(nrow(dd)), dd$match_id)
-  boots <- replicate(300, {
-    draw <- sample(ms, length(ms), replace = TRUE)
-    i <- unlist(idx_by_m[as.character(draw)], use.names = FALSE)
-    f <- suppressWarnings(glm(offside_call ~ margin_near, data = dd[i, ], family = binomial(link = "probit")))
-    c(sigma = 1 / coef(f)[["margin_near"]], pse = -coef(f)[[1]] / coef(f)[["margin_near"]])
-  })
-  psych <- tibble(sigma_eff_yd = sigma_eff, sigma_lo = quantile(boots["sigma", ], 0.025), sigma_hi = quantile(boots["sigma", ], 0.975),
-                  pse_yd = pse, pse_lo = quantile(boots["pse", ], 0.025), pse_hi = quantile(boots["pse", ], 0.975),
-                  auc = {
-                    pos <- dd$margin_near[dd$offside_call == 1]; neg <- dd$margin_near[dd$offside_call == 0]
-                    mean(outer(pos, neg, ">") + 0.5 * outer(pos, neg, "=="))
-                  })
-  message(sprintf("Psychometric width sigma = %.2f yd [%.2f, %.2f]; PSE = %.2f yd; AUC of margin = %.3f",
-                  psych$sigma_eff_yd, psych$sigma_lo, psych$sigma_hi, psych$pse_yd, psych$auc))
+  # Fitted twice: on every evaluable frame (dominated by frames where the
+  # defensive line is out of shot) and on "well-observed" frames (opposing
+  # keeper in frame and >= 8 defenders visible), where the width is closer to
+  # a genuine positional-noise estimate.
+  fit_psych <- function(d) {
+    fit <- glm(offside_call ~ margin_near, data = d, family = binomial(link = "probit"))
+    slope <- coef(fit)[["margin_near"]]
+    set.seed(SEED)
+    ms <- unique(d$match_id); idx_by_m <- split(seq_len(nrow(d)), d$match_id)
+    boots <- replicate(300, {
+      draw <- sample(ms, length(ms), replace = TRUE)
+      i <- unlist(idx_by_m[as.character(draw)], use.names = FALSE)
+      f <- suppressWarnings(glm(offside_call ~ margin_near, data = d[i, ], family = binomial(link = "probit")))
+      c(sigma = 1 / coef(f)[["margin_near"]], pse = -coef(f)[[1]] / coef(f)[["margin_near"]])
+    })
+    pos <- d$margin_near[d$offside_call == 1]; neg <- d$margin_near[d$offside_call == 0]
+    list(fit = fit, row = tibble(
+      n = nrow(d), sigma_eff_yd = 1 / slope,
+      sigma_lo = quantile(boots["sigma", ], 0.025), sigma_hi = quantile(boots["sigma", ], 0.975),
+      pse_yd = -coef(fit)[[1]] / slope, pse_lo = quantile(boots["pse", ], 0.025), pse_hi = quantile(boots["pse", ], 0.975),
+      auc = mean(outer(pos, neg, ">") + 0.5 * outer(pos, neg, "=="))))
+  }
+  well <- dd %>% filter(keeper_opp_in_frame, n_def >= 8)
+  ps_all <- fit_psych(dd); ps_well <- fit_psych(well)
+  psych <- bind_rows(ps_all$row %>% mutate(subset = "all evaluable frames"),
+                     ps_well$row %>% mutate(subset = "well-observed: keeper in frame and 8+ defenders"))
+  message(sprintf("Psychometric width sigma: all frames %.2f yd [%.2f, %.2f]; well-observed %.2f yd [%.2f, %.2f] (n = %d); AUC %.3f / %.3f",
+                  ps_all$row$sigma_eff_yd, ps_all$row$sigma_lo, ps_all$row$sigma_hi,
+                  ps_well$row$sigma_eff_yd, ps_well$row$sigma_lo, ps_well$row$sigma_hi, nrow(well),
+                  ps_all$row$auc, ps_well$row$auc))
 
-  # empirical curve by 1-yard bins
-  curve <- dd %>% mutate(bin = pmin(pmax(round(margin_near), -12), 12)) %>%
+  # empirical curves by 1-yard bins, faceted by subset
+  mk_curve <- function(d, lab) d %>% mutate(bin = pmin(pmax(round(margin_near), -12), 12)) %>%
     group_by(bin) %>% summarise(n = n(), rate = mean(offside_call),
-                                lo = wilson(sum(offside_call), n())[1], hi = wilson(sum(offside_call), n())[2], .groups = "drop")
-  grid <- tibble(margin_near = seq(-12, 12, 0.25))
-  grid$fit <- predict(fit, grid, type = "response")
+                                lo = wilson(sum(offside_call), n())[1], hi = wilson(sum(offside_call), n())[2], .groups = "drop") %>%
+    mutate(subset = lab)
+  curve <- bind_rows(mk_curve(dd, "all evaluable frames"), mk_curve(well, "well-observed: keeper in frame and 8+ defenders"))
+  grid <- bind_rows(
+    tibble(margin_near = seq(-12, 12, 0.25), subset = "all evaluable frames") %>% mutate(fit = predict(ps_all$fit, ., type = "response")),
+    tibble(margin_near = seq(-12, 12, 0.25), subset = "well-observed: keeper in frame and 8+ defenders") %>% mutate(fit = predict(ps_well$fit, ., type = "response")))
   p <- ggplot(curve, aes(bin, rate)) +
     geom_line(data = grid, aes(margin_near, fit), colour = "#2c7fb8") +
     geom_errorbar(aes(ymin = lo, ymax = hi), width = 0, alpha = 0.5) +
     geom_point(aes(size = n), alpha = 0.8) +
     geom_vline(xintercept = 0, linetype = 2, colour = "grey50") +
+    facet_wrap(~ subset) +
     labs(title = "Referee offside calls vs. the engine's torso margin on 360 frames",
-         subtitle = sprintf("Probit width sigma = %.2f yd (95%% CI %.2f to %.2f); negatives are a per-match sample so the midpoint is not a base rate",
-                            psych$sigma_eff_yd, psych$sigma_lo, psych$sigma_hi),
+         subtitle = sprintf("Probit width: all frames %.1f yd; well-observed frames %.1f yd (95%% CI %.1f to %.1f). Negatives are a per-match sample, so the midpoint is not a base rate.",
+                            ps_all$row$sigma_eff_yd, ps_well$row$sigma_eff_yd, ps_well$row$sigma_lo, ps_well$row$sigma_hi),
          x = "Margin of inferred receiver beyond the offside line (yards; + = offside position)",
          y = "Share of passes flagged offside", size = "Passes") +
     theme_minimal(base_size = 12)
   dir.create("figures", showWarnings = FALSE)
-  ggsave(file.path("figures", "offside_psychometric.png"), p, width = 8, height = 5.5, dpi = 300)
+  ggsave(file.path("figures", "offside_psychometric.png"), p, width = 11, height = 5.5, dpi = 300)
 
   # ---- three-way Monte-Carlo call vs referee ------------------------------------------
   conf <- dd %>% count(call3, offside_call) %>%
@@ -164,9 +180,10 @@ write_offside_md <- function(d, strata, strata_max, psych, conf, coverage, acc_c
              "## Agreement by visibility stratum (inferred receiver)", "", hdr, sapply(seq_len(nrow(strata)), function(i) row(strata[i, ])), "",
              "## Furthest-forward attacker rule (any attacker in an offside position)", "", hdr, sapply(seq_len(nrow(strata_max)), function(i) row(strata_max[i, ])), "",
              "## Psychometric fit", "",
-             sprintf("Probit P(call | margin): effective noise width sigma = %.2f yd (95%% cluster-bootstrap CI over matches %.2f to %.2f); point of subjective equality %.2f yd (CI %.2f to %.2f; sampling-dependent); AUC of the margin for separating calls from non-calls = %.3f.",
-                     psych$sigma_eff_yd, psych$sigma_lo, psych$sigma_hi, psych$pse_yd, psych$pse_lo, psych$pse_hi, psych$auc), "",
-             "This width bundles 360 positional precision, receiver mis-identification, torso-vs-limb offsets, and kick-point timing. It is an upper bound on the 360 positional noise alone.", "",
+             "| Subset | n | Width sigma (yd) [95% CI over matches] | Point of subjective equality (yd) | AUC of margin |", "|---|---|---|---|---|",
+             sprintf("| %s | %d | %.2f [%.2f, %.2f] | %.2f [%.2f, %.2f] | %.3f |", psych$subset, psych$n, psych$sigma_eff_yd, psych$sigma_lo, psych$sigma_hi,
+                     psych$pse_yd, psych$pse_lo, psych$pse_hi, psych$auc), "",
+             "The all-frames width bundles 360 positional precision, receiver mis-identification, defenders outside the camera view, torso-vs-limb offsets, and kick-point timing; it is a failure measure of the whole chain, not a precision estimate. The well-observed width is the closer proxy for 360 positional noise plus receiver inference. The point of subjective equality is sampling-dependent (negatives are a per-match sample).", "",
              "![Psychometric curve](../figures/offside_psychometric.png)", "",
              "## Three-way Monte-Carlo call vs. referee", "",
              "| Engine call | Referee: no call | Referee: offside | Total |", "|---|---|---|---|",
