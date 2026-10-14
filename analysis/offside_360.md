@@ -27,9 +27,12 @@ Receiver rule: nearest teammate to the pass end location (frames carry no player
 
 ## Psychometric fit
 
-Probit P(call | margin): effective noise width sigma = 13.17 yd (95% cluster-bootstrap CI over matches 11.26 to 15.54); point of subjective equality 7.06 yd (CI 5.45 to 9.24; sampling-dependent); AUC of the margin for separating calls from non-calls = 0.826.
+| Subset | n | Width sigma (yd) [95% CI over matches] | Point of subjective equality (yd) | AUC of margin |
+|---|---|---|---|---|
+| all evaluable frames | 6632 | 13.17 [11.26, 15.54] | 7.06 [5.45, 9.24] | 0.826 |
+| well-observed: keeper in frame and 8+ defenders | 1598 | 3.56 [2.54, 4.63] | -0.13 [-0.51, 0.37] | 0.948 |
 
-This width bundles 360 positional precision, receiver mis-identification, torso-vs-limb offsets, and kick-point timing. It is an upper bound on the 360 positional noise alone.
+The all-frames width bundles 360 positional precision, receiver mis-identification, defenders outside the camera view, torso-vs-limb offsets, and kick-point timing; it is a failure measure of the whole chain, not a precision estimate. The well-observed width is the closer proxy for 360 positional noise plus receiver inference. The point of subjective equality is sampling-dependent (negatives are a per-match sample).
 
 ![Psychometric curve](../figures/offside_psychometric.png)
 

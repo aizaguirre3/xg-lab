@@ -148,20 +148,31 @@ point_in_polygon <- function(px, py, poly) {
 
 #' Vectorised Monte Carlo with a FIXED receiver (chosen once from the unjittered
 #' frame): much faster than offside_mc for thousands of frames. Jitters every
-#' player and the ball with N(0, sigma) in x (only x matters for the margin).
+#' player and the ball with N(0, sigma) in x (only x matters for the margin) and,
+#' when velocities and sigma_t are supplied, shifts every player along its
+#' velocity by a kick-time error dt ~ N(0, sigma_t) shared within a draw.
 #' Returns the same columns as offside_mc.
+#' @param vx optional per-player x velocity (pitch units per second), same row
+#'   order as `frame`; NULL = no timing uncertainty
 offside_mc_fast <- function(frame, end_xy = NULL, ball_xy = NULL, receiver = "nearest_end",
-                            sigma = 1, n = 500, seed = 7406, pitch_length = 120) {
+                            sigma = 1, sigma_t = 0, vx = NULL,
+                            n = 500, seed = 7406, pitch_length = 120) {
   base <- offside_frame(frame, end_xy, ball_xy, receiver, pitch_length)
   if (!base$ok) return(tibble::tibble(p_offside = NA_real_, margin_median = NA_real_,
                                       margin_q05 = NA_real_, margin_q95 = NA_real_, n = n))
   set.seed(seed)
-  def_x <- frame$x[!frame$teammate]
+  is_def <- !frame$teammate
+  def_x <- frame$x[is_def]
+  att <- which(frame$teammate & !frame$actor)
+  rec_i <- att[which.min(abs(frame$x[att] - base$receiver_x) + abs(frame$y[att] - base$receiver_y))]
+  dt <- if (sigma_t > 0 && !is.null(vx)) stats::rnorm(n, 0, sigma_t) else rep(0, n)
+  vdef <- if (!is.null(vx)) vx[is_def] else rep(0, length(def_x))
+  vrec <- if (!is.null(vx)) vx[rec_i] else 0
   D <- matrix(def_x, nrow = n, ncol = length(def_x), byrow = TRUE) +
-    matrix(stats::rnorm(n * length(def_x), 0, sigma), nrow = n)
+    matrix(stats::rnorm(n * length(def_x), 0, sigma), nrow = n) + outer(dt, vdef)
   sld <- apply(D, 1, function(r) sort(r, decreasing = TRUE)[2])
   ball <- base$ball_x + stats::rnorm(n, 0, sigma)
-  rec  <- base$receiver_x + stats::rnorm(n, 0, sigma)
+  rec  <- base$receiver_x + stats::rnorm(n, 0, sigma) + dt * vrec
   ms <- rec - pmax(sld, ball, pitch_length / 2)
   tibble::tibble(p_offside = mean(ms > 0), margin_median = stats::median(ms),
                  margin_q05 = unname(stats::quantile(ms, 0.05)),

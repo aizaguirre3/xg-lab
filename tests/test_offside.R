@@ -131,3 +131,16 @@ test_that("offside_mc_fast agrees with offside_mc", {
   expect_gt(fl$p_offside, 0.4); expect_lt(fl$p_offside, 0.6)
   expect_false(offside_mc_fast(NULL)$p_offside %in% c(0, 1))
 })
+
+test_that("offside_mc_fast matches offside_mc under timing uncertainty", {
+  vx <- c(0, 8, 0, 0, 0, 0); vy <- rep(0, 6)
+  slow <- offside_mc(frame1, end_xy = c(104, 34), sigma = 0, sigma_t = 0.04, vx = vx, vy = vy, n = 2000)
+  fast <- offside_mc_fast(frame1, end_xy = c(104, 34), sigma = 0, sigma_t = 0.04, vx = vx, n = 2000)
+  expect_lt(abs(fast$margin_median - slow$margin_median), 0.1)
+  expect_lt(abs((fast$margin_q95 - fast$margin_q05) - (slow$margin_q95 - slow$margin_q05)), 0.15)
+  # a defender sprinting back (negative vx) widens the interval the same way
+  vx2 <- c(0, 0, 0, 0, -8, 0)
+  f2 <- offside_mc_fast(frame1, end_xy = c(104, 34), sigma = 0, sigma_t = 0.05, vx = vx2, n = 2000)
+  expect_gt(f2$margin_q95 - f2$margin_q05, 0.8)
+  expect_lt(abs(f2$margin_median - 5), 0.3)
+})
