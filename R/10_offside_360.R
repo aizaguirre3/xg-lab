@@ -142,7 +142,7 @@ run_offside_360 <- function(in_path = file.path("data", "pass_frames.rds")) {
     geom_vline(xintercept = 0, linetype = 2, colour = "grey50") +
     facet_wrap(~ subset) +
     labs(title = "Referee offside calls vs. the engine's torso margin on 360 frames",
-         subtitle = sprintf("Probit width: all frames %.1f yd; well-observed frames %.1f yd (95%% CI %.1f to %.1f). Negatives are a per-match sample, so the midpoint is not a base rate.",
+         subtitle = sprintf("Probit width: all frames %.1f yd; well-observed frames %.1f yd (95%% CI %.1f to %.1f). Negatives are a per-match sample.",
                             ps_all$row$sigma_eff_yd, ps_well$row$sigma_eff_yd, ps_well$row$sigma_lo, ps_well$row$sigma_hi),
          x = "Margin of inferred receiver beyond the offside line (yards; + = offside position)",
          y = "Share of passes flagged offside", size = "Passes") +

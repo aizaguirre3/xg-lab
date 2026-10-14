@@ -114,6 +114,35 @@ Tunable via env vars: `XG_COMPETITIONS` (comma-sep names), `XG_MAX_MATCHES`
   the build is tractable; raise `XG_MAX_MATCHES` for the full pull. Exact counts
   are computed in code and shown in the report — never assumed.
 
+## VAR-Lab: refereeing decisions and offside geometry (layers 1 and 2)
+
+A second track asks how far open data can go toward what official VAR systems
+do. The scoping memo ([`docs/var_vision_scope.md`](docs/var_vision_scope.md))
+establishes that it cannot reproduce the metrology (29 body points at 50 Hz,
+500 Hz ball sensors, centimetre lines) and recommends building the **decision
+layer** on StatsBomb 360 frames first, with a video front-end only if SoccerNet
+access and a GPU are available. Layers 1 and 2 are built and evaluated
+([`analysis/varlab_report.md`](analysis/varlab_report.md)):
+
+| Component | Result (out of fold, 426 matches with 360 frames) |
+|---|---|
+| P(card \| foul), GAM on context + 360 features | log loss **0.305** vs 0.335 base rate (gap CI excludes zero), ECE 0.005, no drop on held-out referees |
+| P(penalty \| foul in own box) | 143 of 148 own-box fouls were penalties: no model beats the base rate, reported as such |
+| Referee strictness, glmer shrinkage | SD 0.17 logit; split-half persistence r 0.20 (p 0.17); referee identity adds nothing out of sample |
+| Law 11 engine vs. referee offside calls on 360 frames | 91% agreement beyond 2 yards (97% with the keeper in frame); abstains on 24% of frames, 91% accurate on the rest |
+
+```
+R/06_ingest_decisions.R  fouls / cards / offside events + 360 join + referee
+R/07_decision_models.R   calibrated card & penalty models, bootstrap CIs, abstention
+R/08_referee_effects.R   referee random intercepts, persistence, out-of-sample value
+R/09_offside_engine.R    pure Law 11 geometry + Monte-Carlo uncertainty (unit-tested)
+R/10_offside_360.R       engine vs. calls on 360 frames, visibility strata, psychometric fit
+R/11_offside_tracking.R  engine on 25 Hz Metrica tracking: kick-frame ambiguity
+```
+
+Run with `XG_VARLAB=1 Rscript run_all.R` (pulls ~4 GB of events + 360 frames).
+This is not VAR and never will be: see the honest-limits section of the report.
+
 ## Data license & attribution
 
 Data provided by **StatsBomb** via their
