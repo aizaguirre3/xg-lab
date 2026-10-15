@@ -13,7 +13,9 @@
 # Only two flagged offsides exist in these two games, so positives are case
 # studies; the statistically useful number is the false-positive rate on the
 # ~1,700 passes that were not flagged.
-# Data: data/external/metrica/data/Sample_Game_{1,2} (CC BY 4.0, Metrica Sports).
+# Data: data/external/metrica/data/Sample_Game_{1,2}. Metrica Sports publishes these
+# anonymised sample games without a formal licence; its README asks for responsible
+# use and acknowledgement of the source when used publicly.
 # Writes data/offside_tracking_eval.rds, figures/offside_tracking_margins.png,
 #        analysis/offside_tracking.md
 # -----------------------------------------------------------------------------

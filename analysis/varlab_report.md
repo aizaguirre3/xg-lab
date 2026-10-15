@@ -2,7 +2,7 @@
 
 Status: layers 1 and 2 of the plan in [`docs/var_vision_scope.md`](../docs/var_vision_scope.md) (milestones M0 to M3). Layer 3 (video) is not started: it needs SoccerNet access, Python/PyTorch and a GPU, none of which this build environment has.
 
-Data: StatsBomb Open Data (non-commercial licence, no redistribution; attribution and logo required), 426 matches with 360 freeze frames across 12 competition-seasons; Metrica Sports sample tracking data (CC BY 4.0, 2 games). Nothing here is, or claims to be, VAR-grade: official systems track 29 body points per player at 50 Hz with a 500 Hz ball sensor; this project works on 2D torso-level snapshots and event timestamps.
+Data: StatsBomb Open Data (non-commercial licence, no redistribution; attribution and logo required), 426 matches with 360 freeze frames across 12 competition-seasons; Metrica Sports sample tracking data (2 anonymised games; no formal licence, Metrica asks for responsible use and acknowledgement). Nothing here is, or claims to be, VAR-grade: official systems track 29 body points per player at 50 Hz with a 500 Hz ball sensor; this project works on 2D torso-level snapshots and event timestamps.
 
 ## Headline results
 

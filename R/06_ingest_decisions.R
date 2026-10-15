@@ -23,12 +23,16 @@
 #   XG_DEC_MAX_MATCHES  cap on matches (default: all); "" = no cap
 #   XG_DEC_NEG_PER_MATCH negatives sampled per match for pass_frames (default 15)
 #   XG_DEC_CORES        parallel workers for parsing (default: cores - 1)
+#   XG_SB_REF           statsbomb/open-data git ref to pull from (default master)
 # -----------------------------------------------------------------------------
 suppressPackageStartupMessages({
   library(jsonlite); library(dplyr); library(purrr); library(tibble); library(tidyr)
 })
 
-SB_BASE <- "https://raw.githubusercontent.com/statsbomb/open-data/master/data"
+# Pin the StatsBomb open-data revision with XG_SB_REF (a branch or a commit
+# SHA) so a later pull reproduces the same files; "master" follows upstream.
+SB_REF  <- Sys.getenv("XG_SB_REF", "master")
+SB_BASE <- sprintf("https://raw.githubusercontent.com/statsbomb/open-data/%s/data", SB_REF)
 RAW_DIR <- file.path("data", "sb_raw")
 DECISION_TYPES <- c("Foul Committed", "Foul Won", "Bad Behaviour", "Offside")
 PITCH_AREA <- 120 * 80
