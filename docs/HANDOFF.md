@@ -4,7 +4,7 @@ Written 2026-10-15 at the end of the cloud session that built layers 1 and 2. Ev
 
 ## 1. State of the work
 
-- Branch: `docs/var-vision-scope` on `https://github.com/aizaguirre3/xg-lab` (public repository), seven commits on top of `main`, nothing merged, no pull request opened.
+- Branch: `docs/var-vision-scope` on `https://github.com/aizaguirre3/xg-lab` (public repository), eight commits on top of `main`, nothing merged, no pull request opened.
 - Built and verified: milestones M0 to M3 of [`var_vision_scope.md`](var_vision_scope.md). Results and reproduce commands are in [`../analysis/varlab_report.md`](../analysis/varlab_report.md).
 - Not built: M4 and M5 (video pipeline and offside line from broadcast clips), M6 (foul classifier), readers for the DFL IDSSE and SkillCorner tracking formats, a Quarto section (the write-up is markdown), and an xgboost variant of the decision models.
 - A clean clone of the branch was tested in the cloud session: all tests pass, and a 4-match data pull from scratch worked end to end.
@@ -21,7 +21,7 @@ Written 2026-10-15 at the end of the cloud session that built layers 1 and 2. Ev
 | Third-party software installed | Ubuntu packages for R 4.3.3 and CRAN libraries via apt (signed), Python packages via pip from PyPI (numpy 2.5.3, pandas 3.0.5, scipy 1.18.1, scikit-learn 1.9.1, statsmodels 0.15.0, pytest 9.1.1). |
 | Credentials used | None. Every source was anonymous public access. Attaching SkillCorner with credentials was requested and denied by the session's permission classifier; nothing was granted. |
 | Snowflake loader (`snowflake/load_to_snowflake.sql`) | Contains role and warehouse names only, no account identifier or password. |
-| Git author identity on the new commits | **Your personal email address** (taken from the session's account context) is the commit author on the first six; the seventh (this handoff) uses the GitHub noreply form. Commits on `main` used a non-routable placeholder (`alejandro@alejandros-air.lan`). The repository is public, so the address is visible in commit metadata. See section 7 for the fix; the branch is unmerged, so rewriting it is cheap. |
+| Git author identity on the new commits | The first six commits were originally authored with your personal email address (taken from the session's account context); the repository is public. On 2026-10-15, with your approval, the branch was rewritten so every commit uses `aizaguirre3@users.noreply.github.com` as author and committer (dates, messages and trees unchanged) and force-pushed. GitHub can keep the superseded commits reachable by their old SHA for a while, so the address may remain visible via those SHAs until GitHub garbage-collects them; nothing in the current branch references them. Commits on `main` use a non-routable placeholder (`alejandro@alejandros-air.lan`). |
 | Licence statements | StatsBomb and SkillCorner terms were read from the licence files. Metrica publishes no licence file (its README asks for responsible use and acknowledgement); an earlier "CC BY 4.0" label for Metrica was wrong and has been corrected. |
 
 ## 3. Local setup
@@ -31,7 +31,8 @@ Prerequisites: git, R 4.3 or newer, Python 3.10 or newer, about 6 GB of free dis
 ```bash
 git clone -b docs/var-vision-scope https://github.com/aizaguirre3/xg-lab
 cd xg-lab
-git log --oneline origin/main..HEAD        # expect 7 commits, the top one touching docs/HANDOFF.md
+git log --oneline origin/main..HEAD        # expect 8 commits, the top one touching docs/HANDOFF.md
+git log --format='%ae' origin/main..HEAD | sort -u   # expect only aizaguirre3@users.noreply.github.com
 
 # R packages (all from CRAN; mgcv ships with R)
 Rscript -e 'install.packages(c("jsonlite","dplyr","tidyr","purrr","tibble","ggplot2","lme4","xgboost","here","testthat"))'
@@ -126,9 +127,9 @@ Random seeds are fixed (7406), so numbers reproduce exactly on the same data; sm
 - Broadcast footage: never scrape Premier League or La Liga video. SoccerNet is the only lawful video source identified; read its gated terms before publishing weights or clips.
 - The models here are analytics, not officiating. Nothing in this repository should be presented as making or recommending a refereeing decision.
 
-## 7. Fixing the author email on the branch (optional, your call)
+## 7. Author email on the branch (done)
 
-Six of the seven commits on `docs/var-vision-scope` are authored as `alejandro_gody@hotmail.es`. If you would rather not have that address in a public history, rewrite the unmerged branch and force-push it. Nobody else has based work on it.
+The rewrite below was applied on 2026-10-15 and force-pushed; every commit on the branch now uses the GitHub noreply address. If you ever need to repeat it on another unmerged branch:
 
 ```bash
 git config user.email "aizaguirre3@users.noreply.github.com"
@@ -138,11 +139,11 @@ git log --format='%h %ae' origin/main..HEAD      # all lines should show the nor
 git push --force-with-lease origin docs/var-vision-scope
 ```
 
-Deleting the branch and re-pushing from a fresh clone also works. GitHub keeps the old commits reachable by SHA for a while even after a force-push, so do this before the branch is shared further if it matters.
+If you had cloned the branch before 2026-10-15, discard that clone or reset it to the rewritten remote (`git fetch && git reset --hard origin/docs/var-vision-scope`); do not merge or rebase the old commits back in, or the old identity returns. GitHub keeps superseded commits reachable by SHA for a while after a force-push.
 
 ## 8. What to do next, in order
 
-1. Decide on section 7, then open a pull request to `main` if you want the work merged.
+1. Open a pull request to `main` if you want the work merged (the author rewrite in section 7 is done).
 2. Add the StatsBomb logo to the README (licence 1.4).
 3. Write readers for SkillCorner (`*_tracking_extrapolated.jsonl`, 10 fps, metres, centre origin) and IDSSE (TRACAB positions, 25 Hz) so `R/11_offside_tracking.R` can run on them; the engine's `to_attacking_frame()` already handles centre-origin coordinates. SkillCorner's pose files give the limb-level offset measurement the scope asked for.
 4. M4/M5 only after SoccerNet access and a 12 to 24 GB GPU are in hand; the stack is listed in `var_vision_scope.md` section 6.
