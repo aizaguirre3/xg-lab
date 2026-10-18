@@ -145,7 +145,24 @@ This is not VAR and never will be: see the honest-limits section of the report.
 
 ## Data license & attribution
 
+<a href="https://github.com/statsbomb/open-data"><img src="figures/statsbomb_logo.png" alt="StatsBomb logo" width="320"></a>
+
 Data provided by **StatsBomb** via their
 [Open Data](https://github.com/statsbomb/open-data) repository, free for
-**non-commercial use**. This project is a non-commercial portfolio/skills
-exercise. The `data/` directory is gitignored.
+**non-commercial use** under the
+[StatsBomb Open Data licence](https://github.com/statsbomb/open-data/blob/master/LICENSE.pdf).
+This project is a non-commercial portfolio/skills exercise. The data is not
+redistributed: the `data/` directory is gitignored and only code and aggregate
+results are committed.
+
+The logo above is StatsBomb's official asset, shown as the licence (section 1.4)
+asks of published analysis. It is an unmodified copy of
+`img/SB - Icon Lockup - Colour positive.png` from the open-data repository at
+commit `4b73468fc5b0f1950f9f66fada70ad3a4f9327cb`
+([source](https://github.com/statsbomb/open-data/blob/4b73468fc5b0f1950f9f66fada70ad3a4f9327cb/img/SB%20-%20Icon%20Lockup%20-%20Colour%20positive.png),
+sha256 `8ba5480785f0dc4be2342ec47c70509483eb79287f85f92be1dfba36fc2872a7`).
+
+The 25 Hz tracking used by `R/11_offside_tracking.R` is the
+[Metrica Sports sample data](https://github.com/metrica-sports/sample-data)
+(two anonymised games; no formal licence, Metrica asks for responsible use and
+acknowledgement).
