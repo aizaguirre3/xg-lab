@@ -6,7 +6,8 @@ Written 2026-10-15 at the end of the cloud session that built layers 1 and 2. Ev
 
 - Branch: `docs/var-vision-scope` on `https://github.com/aizaguirre3/xg-lab` (public repository), eight commits on top of `main`, nothing merged, no pull request opened.
 - Built and verified: milestones M0 to M3 of [`var_vision_scope.md`](var_vision_scope.md). Results and reproduce commands are in [`../analysis/varlab_report.md`](../analysis/varlab_report.md).
-- Not built: M4 and M5 (video pipeline and offside line from broadcast clips), M6 (foul classifier), readers for the DFL IDSSE and SkillCorner tracking formats, a Quarto section (the write-up is markdown), and an xgboost variant of the decision models.
+- Not built: M4 and M5 (video pipeline and offside line from broadcast clips), M6 (foul classifier), a reader for the DFL IDSSE tracking format, a Quarto section (the write-up is markdown), and an xgboost variant of the decision models.
+- Added locally on 2026-10-17 (after this handoff was written): a SkillCorner reader (`R/12_read_skillcorner.R`) and a provider-agnostic `evaluate_tracking_match()` in `R/11_offside_tracking.R`, so the Law 11 engine runs on the 20 A-League matches as well as on Metrica; results in `analysis/offside_tracking.md`.
 - A clean clone of the branch was tested in the cloud session: all tests pass, and a 4-match data pull from scratch worked end to end.
 
 ## 2. Safety audit of what the cloud session did
@@ -43,7 +44,7 @@ pip install -e . pytest
 pytest tests/python -q                      # expect 40 passed, 4 skipped
 
 # R tests (no data needed)
-Rscript -e 'source("R/utils.R"); for (f in list.files("R", pattern = "^0[6-9]|^1[01]", full.names = TRUE)) source(f); testthat::test_dir("tests")'
+Rscript -e 'source("R/utils.R"); for (f in list.files("R", pattern = "^0[6-9]|^1[0-2]", full.names = TRUE)) source(f); testthat::test_dir("tests")'
 ```
 
 Set a non-personal git identity before committing from your machine if you want to keep it that way:
@@ -60,7 +61,7 @@ All downloads are over HTTPS from the project's official host. Pin the revision 
 |---|---|---|---|---|---|
 | StatsBomb Open Data (events + 360 frames) | `https://github.com/statsbomb/open-data`, files via `https://raw.githubusercontent.com/statsbomb/open-data/<ref>/data/` | Non-commercial only; no redistribution of the data; attribution and the StatsBomb logo on published analysis (licence 1.2.1, 1.2.2, 1.4) | `master` at commit `4b73468fc5b0f1950f9f66fada70ad3a4f9327cb` (as of 2026-10-15; the session pulled on 2026-10-14) | 852 files, 4.3 GB | `R/06_ingest_decisions.R` |
 | Metrica Sports sample data | `https://github.com/metrica-sports/sample-data` | No licence file; README: "be responsible with the use of this data", acknowledge the source if used publicly; games are anonymised | commit `e706dd506b360d69d9d123d5b8026e7294b13996` (2021-04-15) | 234 MB | `R/11_offside_tracking.R` |
-| SkillCorner open data (A-League 2024/25 tracking, 20 matches) | `https://github.com/SkillCorner/opendata` | MIT; SkillCorner asks for credit | commit `4340d274572876239c154c90bc507a9b3250a656` (2026-09-14) | ~100 MB per match via Git LFS (not fetched in the cloud) | not yet supported: needs a JSONL reader |
+| SkillCorner open data (A-League 2024/25 tracking, 20 matches) | `https://github.com/SkillCorner/opendata` | MIT; SkillCorner asks for credit | commit `4340d274572876239c154c90bc507a9b3250a656` (2026-09-14) | 1.83 GB for the 20 `*_tracking_extrapolated.jsonl` files via Git LFS (85 to 102 MB each); the clone without them is about 150 MB | `R/12_read_skillcorner.R` -> `R/11_offside_tracking.R` |
 | SkillCorner body pose (2 matches, 25 Hz) | `https://huggingface.co/datasets/SkillCorner/opendata-bodypose` | MIT | not fetched (host blocked in the cloud) | ~3.3 GB per match | not yet supported |
 | DFL / Sportec IDSSE (7 Bundesliga matches, TRACAB positions + events) | `https://doi.org/10.6084/m9.figshare.28196177` (figshare lists an MD5 per file) | CC BY 4.0; name the DFL and cite Bassek et al. 2025 | not fetched (host blocked in the cloud) | unknown | not yet supported: needs an XML/CSV reader |
 | SoccerNet (video, GSR, MV-Foul) | `https://www.soccer-net.org` and `https://github.com/SoccerNet` | Gated: access form / NDA for video; read the Hugging Face terms before publishing anything | not fetched | tens of GB | M4 and M5 (unbuilt) |
@@ -90,14 +91,39 @@ git -C data/external/metrica checkout e706dd506b360d69d9d123d5b8026e7294b13996
 Rscript R/11_offside_tracking.R          # ~4 min; expect 1,763 passes, 1 flagged offside
 ```
 
+With the SkillCorner data fetched as well (next subsection), the same command then takes about 30 more minutes and should report
+`Passes evaluated: 16055 | flagged offside: 62` for the 20 matches; `analysis/offside_tracking.md` gets a SkillCorner section with a
+false-positive rate of 0.012 for the targeted receiver (0.002 on Metrica) and a 1-frame (100 ms) median margin shift of 0.11 m.
+If those differ, SkillCorner changed the data between revisions; re-pin to the commit above or document the new counts.
+
+### Pull the SkillCorner data, pinned
+
+```bash
+git clone https://github.com/SkillCorner/opendata.git data/external/skillcorner      # pointers only if git-lfs is absent
+git -C data/external/skillcorner checkout 4340d274572876239c154c90bc507a9b3250a656
+# With git-lfs installed:
+git -C data/external/skillcorner lfs pull --include "data/matches/*/*_tracking_extrapolated.jsonl"
+Rscript R/11_offside_tracking.R          # Metrica (if present) then the 20 SkillCorner matches
+```
+
+Without git-lfs (the 2026-10-17 local run did this, so nothing had to be installed): each pointer file names the object's
+sha256 and size, and GitHub serves the object over HTTPS at
+`https://media.githubusercontent.com/media/SkillCorner/opendata/<commit>/<path>`. Download each
+`data/matches/<id>/<id>_tracking_extrapolated.jsonl` from that URL, check `shasum -a 256` against the pointer's `oid`
+and the byte count against its `size`, and replace the pointer with the verified file. All 20 verified on 2026-10-17.
+`read_skillcorner_tracking()` refuses a file that is still a pointer. The `*_dynamic_events.csv` and `*_match.json`
+files are ordinary git blobs and come with the clone.
+
+Reader facts checked on the real data (also pinned by `tests/test_skillcorner.R` on a hand-written fixture):
+tracking frames are contiguous at 10 fps with 22 players whenever the ball is in play; a pass is a `player_possession`
+row with `end_type == "pass"`, kicked at `frame_end`; event coordinates are normalised so the possession team attacks
+toward +x (for `attacking_side == "right_to_left"` they are the raw tracking coordinates rotated by 180 degrees), which
+the reader undoes; `pass_outcome == "offside"` is the provider's offside flag.
+
 ### Fetch what the cloud could not (optional, for the unbuilt readers)
 
 ```bash
-# SkillCorner tracking (Git LFS) and pose (Hugging Face). Keep any HF token in an env var, never in a file in the repo.
-git lfs install
-git clone https://github.com/SkillCorner/opendata.git data/external/skillcorner
-git -C data/external/skillcorner checkout 4340d274572876239c154c90bc507a9b3250a656
-git -C data/external/skillcorner lfs pull --include "data/matches/*/*_tracking_extrapolated.jsonl"
+# SkillCorner pose (Hugging Face). Keep any HF token in an env var, never in a file in the repo.
 export HF_TOKEN=...   # only if the pose dataset asks for it; do not commit it
 # IDSSE: download the archive from the figshare DOI above and compare each file's MD5 with the values figshare displays.
 ```
@@ -111,7 +137,7 @@ Rscript R/06_ingest_decisions.R    # data/decisions.rds, data/pass_frames.rds, a
 Rscript R/07_decision_models.R     # card GAM: OOF log loss 0.305 vs 0.335 base rate; analysis/decision_models.md
 Rscript R/08_referee_effects.R     # referee SD 0.17 logit, persistence r 0.20; figures/referee_shrinkage.png
 Rscript R/10_offside_360.R         # 91% agreement beyond 2 yd; analysis/offside_360.md
-Rscript R/11_offside_tracking.R    # 0.2% false positives with the true receiver; analysis/offside_tracking.md
+Rscript R/11_offside_tracking.R    # Metrica: 0.2% false positives with the true receiver; SkillCorner (if fetched): 1.2%, 62 flags in 52 stoppages; analysis/offside_tracking.md
 Rscript tools/export_parity.R data/decision_oof.rds data/parity && pytest tests/python -q   # parity needs columns p_xgb, is_goal, fold; see analysis/varlab_report.md
 # or, after the original xG pipeline: XG_VARLAB=1 Rscript run_all.R
 ```
@@ -145,7 +171,7 @@ If you had cloned the branch before 2026-10-15, discard that clone or reset it t
 
 1. Open a pull request to `main` if you want the work merged (the author rewrite in section 7 is done).
 2. Add the StatsBomb logo to the README (licence 1.4).
-3. Write readers for SkillCorner (`*_tracking_extrapolated.jsonl`, 10 fps, metres, centre origin) and IDSSE (TRACAB positions, 25 Hz) so `R/11_offside_tracking.R` can run on them; the engine's `to_attacking_frame()` already handles centre-origin coordinates. SkillCorner's pose files give the limb-level offset measurement the scope asked for.
+3. SkillCorner reader: done (`R/12_read_skillcorner.R`, 2026-10-17). Still to write: an IDSSE reader (TRACAB positions, 25 Hz) that builds the same match bundle for `evaluate_tracking_match()`, and a pose reader for SkillCorner's body-pose files, which give the limb-level offset measurement the scope asked for.
 4. M4/M5 only after SoccerNet access and a 12 to 24 GB GPU are in hand; the stack is listed in `var_vision_scope.md` section 6.
 5. Optional: add xgboost to `R/07_decision_models.R` now that CRAN is reachable, and re-render `analysis/report.qmd` with Quarto if you want the xG report and VAR-Lab in one document.
 
