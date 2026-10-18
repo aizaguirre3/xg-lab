@@ -389,6 +389,8 @@ run_offside_tracking <- function(games = c("Sample_Game_1", "Sample_Game_2")) {
   invisible(res)
 }
 
+skillcorner_figure_title <- function(n_matches) sprintf("Targeted receiver's torso margin at the kick frame (SkillCorner, %d matches)", n_matches)
+
 run_offside_skillcorner <- function(matches = skillcorner_matches(), sigma = 0.3, n_mc = 300) {
   if (!length(matches)) stop("No materialised SkillCorner tracking files under ", SKILLCORNER_DIR)
   bundles <- list()
@@ -406,7 +408,7 @@ run_offside_skillcorner <- function(matches = skillcorner_matches(), sigma = 0.3
   s <- summarise_tracking_eval(res)
   dir.create("figures", showWarnings = FALSE)
   ggsave(file.path("figures", "offside_tracking_margins_skillcorner.png"),
-         margin_histogram(res, sprintf("Torso margin of the targeted receiver at the kick frame (SkillCorner, %d A-League matches)", length(matches))),
+         margin_histogram(res, skillcorner_figure_title(length(matches))),
          width = 8, height = 5, dpi = 300)
   dir.create("data", showWarnings = FALSE)
   saveRDS(list(provider = "skillcorner", passes = res, fps = SKILLCORNER_FPS, sigma_t = 0.5 / SKILLCORNER_FPS,
