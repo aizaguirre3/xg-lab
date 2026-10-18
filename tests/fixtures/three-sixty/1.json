@@ -1,0 +1,18 @@
+[
+ {"event_uuid":"e-foul-1","visible_area":[0.0,0.0,60.0,0.0,60.0,80.0,0.0,80.0,0.0,0.0],
+  "freeze_frame":[
+   {"teammate":true,"actor":true,"keeper":false,"location":[10.0,40.0]},
+   {"teammate":true,"actor":false,"keeper":true,"location":[2.0,40.0]},
+   {"teammate":false,"actor":false,"keeper":false,"location":[12.0,42.0]},
+   {"teammate":false,"actor":false,"keeper":false,"location":[30.0,20.0]}]},
+ {"event_uuid":"e-pass-off","visible_area":[40.0,0.0,120.0,0.0,120.0,80.0,40.0,80.0,40.0,0.0],
+  "freeze_frame":[
+   {"teammate":true,"actor":true,"keeper":false,"location":[70.0,30.0]},
+   {"teammate":true,"actor":false,"keeper":false,"location":[96.0,33.0]},
+   {"teammate":false,"actor":false,"keeper":false,"location":[94.0,40.0]},
+   {"teammate":false,"actor":false,"keeper":true,"location":[118.0,40.0]}]},
+ {"event_uuid":"e-pass-ok","visible_area":[40.0,0.0,120.0,0.0,120.0,80.0,40.0,80.0,40.0,0.0],
+  "freeze_frame":[
+   {"teammate":true,"actor":true,"keeper":false,"location":[65.0,30.0]},
+   {"teammate":false,"actor":false,"keeper":false,"location":[90.0,40.0]}]}
+]
