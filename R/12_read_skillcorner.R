@@ -208,7 +208,7 @@ load_skillcorner_match <- function(match_id, dir = SKILLCORNER_DIR) {
   tr <- read_skillcorner_tracking(match_id, meta, dir)
   passes <- read_skillcorner_passes(match_id, meta, dir)
   agree <- skillcorner_passer_agreement(tr, passes)
-  if (!is.na(agree) && agree < 0.95) warning("match ", match_id, ": passer position in the events is within 0.5 m of the tracking on only ",
+  if (!is.na(agree) && agree < 0.8) warning("match ", match_id, ": passer position in the events is within 0.5 m of the tracking on only ",
                                              round(100 * agree, 1), "% of passes")
   list(id = as.character(match_id), provider = "skillcorner", home = tr$home, away = tr$away, passes = passes,
        dir = meta$dir, pl = meta$pitch_length, pw = meta$pitch_width, fps = SKILLCORNER_FPS, origin = "centre",

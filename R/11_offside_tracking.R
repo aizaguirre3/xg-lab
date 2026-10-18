@@ -326,7 +326,7 @@ skillcorner_section_lines <- function(out) {
             per_match$evaluated, per_match$flagged, per_match$fp_true, per_match$sld_detected_share,
             ifelse(is.na(per_match$passer_agreement), "", sprintf("%.3f", per_match$passer_agreement)),
             ifelse(is.na(per_match$passer_agreement_exact), "", sprintf("%.3f", per_match$passer_agreement_exact))), "",
-    sprintf("The last two columns check the reader: the passer's position in the dynamic events, after undoing SkillCorner's attack-direction normalisation, is compared with the tracking at the event's kick frame. In %d of %d matches the two are bit-identical; in the others the events sit a few centimetres from the tracking (a different processing pass of the same positions), and the agreement peaks at the kick frame rather than at a neighbouring one.", n_exact, nrow(per_match)), "",
+    sprintf("The last two columns check the reader: the passer's position in the dynamic events, after undoing SkillCorner's attack-direction normalisation, is compared with the tracking at the event's kick frame. In %d of %d matches the two are bit-identical; in the others the events come from a different processing pass over the same positions, with a median offset of a few centimetres and a tail beyond 0.5 m (the share within 0.5 m is the column before last), and the agreement peaks at the kick frame rather than at a neighbouring one.", n_exact, nrow(per_match)), "",
     common_section_lines(s, out$fps, mc_label),
     "### Sensitivity on the passes SkillCorner flagged offside", "",
     "| Receiver rule | Share with margin > 0 | 95% CI | n |", "|---|---|---|---|",
