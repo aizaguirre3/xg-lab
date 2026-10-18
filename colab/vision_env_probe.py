@@ -119,7 +119,20 @@ def stage1(args: argparse.Namespace) -> int:
     if args.out:
         cmd += ["--out", args.out]
     print("stage 2 in a fresh interpreter:", " ".join(cmd), flush=True)
-    return subprocess.call(cmd)
+    # Pipe the child's output through print(): inside a Jupyter kernel a child that
+    # inherits fd 1 writes to the VM's console, not to the captured stream.
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        print(line, end="", flush=True)
+    rc = proc.wait()
+    summary = Path(args.out) if args.out else work / "vision_env_probe.json"
+    if summary.is_file():
+        print("PROBE_SUMMARY_FILE", summary, flush=True)
+        print("PROBE_SUMMARY_JSON", summary.read_text().replace("\n", " "), flush=True)
+    else:
+        print("stage 2 wrote no summary (rc", rc, ")", flush=True)
+    return rc
 
 
 # ----------------------------------------------------------------------------
