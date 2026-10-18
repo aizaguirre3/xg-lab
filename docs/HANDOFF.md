@@ -175,6 +175,44 @@ If you had cloned the branch before 2026-10-15, discard that clone or reset it t
 4. M4/M5 only after SoccerNet access and a 12 to 24 GB GPU are in hand; the stack is listed in `var_vision_scope.md` section 6.
 5. Optional: add xgboost to `R/07_decision_models.R` now that CRAN is reachable, and re-render `analysis/report.qmd` with Quarto if you want the xG report and VAR-Lab in one document.
 
+### M4 on Colab (added 2026-10-17)
+
+The vision scaffold lives in `varlab_vision/` (loaders, GS-HOTA adapter,
+synthetic clip, detection -> tracking -> team -> pose pipeline), pinned in
+`requirements-vision.txt` with licences in `varlab_vision/LICENSES.md`; the
+CPU-only tests are `pytest tests/vision` (CI job `vision`, about a minute of
+installs, no torch, no weights). Nothing in it needs SoccerNet files.
+
+Workflow on the user's Colab Pro via `~/.local/bin/colab` (always pass `-s`):
+
+```bash
+# 1. environment probe: fresh L4, installs, weights, synthetic-clip timings, then releases the VM
+colab run --gpu L4 --timeout 600 -s varlab-vision-env colab/vision_env_probe.py --ref <commit-sha>
+# 2. once GSR access arrives: clips in batches under 45 min, each result downloaded as it is written
+HF_TOKEN=... python colab/run_clips.py --clips SNGS-021 SNGS-022 --split valid --ref <commit-sha> \
+    --out data/gsr_pred/valid --session varlab-clips --gpu L4 --budget-min 45 [--resume]
+colab sessions   # must print "No active sessions" when done
+```
+
+`run_clips.py` does `colab new` -> upload the token as a 0600 file (never in a
+command line or exec payload) -> `colab install -r requirements-vision.txt` ->
+`colab restart-kernel` -> `colab exec -f colab/vision_worker.py` -> `setup(ref=...)`
+-> per clip `process_clip(...)` then `colab download` -> `colab stop` in a
+`finally`. Do not pin numpy on the VM (the kernel has it pre-imported) and do
+not install inside a kernel you then import from; both failure modes are
+written up in `analysis/vision_env.md`. It has not been run on real clips.
+
+Measured on the L4 on 2026-10-17 (full table in `analysis/vision_env.md`):
+clone 2 s, pip 40 s + 7 s for the GPU ONNX Runtime, weights 1.21 GB (RF-DETR
+Medium 386 MB, SigLIP 775 MB, RTMPose-m 52 MB); on 1920x1080 synthetic frames
+RF-DETR Medium 46 fps, ByteTrack 823 fps, SigLIP 326 crops/s, RTMPose-m 19.6 fps
+at 11 people (216 people/s); peak GPU memory 1.2 GB reserved (1.6 GB on
+`nvidia-smi`); smoke-pipeline GS-HOTA on the synthetic clip 0.88 (0.92 players
+only). Expect 1.5 to 2 min per real clip, so the 49 validation clips are two to
+three 45-minute runs. Still missing for M4 proper: pitch calibration (own
+implementation; PnLCalib is GPL-2), jersey recognition, a referee/goalkeeper
+role classifier, and the dataset's folder layout on Hugging Face.
+
 ## 9. Things the cloud session could not verify
 
 - The StatsBomb revision actually pulled on 2026-10-14 was `master` at that time; the SHA above is `master` on 2026-10-15. If the TOTAL counts in section 4 match after your pull, the data is the same.
