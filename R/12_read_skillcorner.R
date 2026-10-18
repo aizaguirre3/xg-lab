@@ -187,9 +187,12 @@ read_skillcorner_passes <- function(match_id, meta, dir = SKILLCORNER_DIR) {
 
 #' Share of passes whose passer sits, in the tracking, within `tol` metres of the
 #' event's (de-normalised) passer position at the kick frame: a check that the
-#' event frame index and coordinate frame line up with the tracking. NA when no
-#' pass can be checked.
-skillcorner_passer_agreement <- function(tr, passes, tol = 0.011) {
+#' event frame index and coordinate frame line up with the tracking. In half of
+#' the open-data matches the event coordinates are bit-identical to the tracking;
+#' in the other half they sit a median of about 9 cm away (events derived from a
+#' differently processed tracking pass), hence the 0.5 m default. NA when no pass
+#' can be checked.
+skillcorner_passer_agreement <- function(tr, passes, tol = 0.5) {
   ok <- vapply(seq_len(nrow(passes)), function(i) {
     t <- if (passes$team[i] == "Home") tr$home else tr$away
     k <- match(passes$start_frame[i], t$frame); j <- match(passes$from[i], t$players)
@@ -205,9 +208,10 @@ load_skillcorner_match <- function(match_id, dir = SKILLCORNER_DIR) {
   tr <- read_skillcorner_tracking(match_id, meta, dir)
   passes <- read_skillcorner_passes(match_id, meta, dir)
   agree <- skillcorner_passer_agreement(tr, passes)
-  if (!is.na(agree) && agree < 0.95) warning("match ", match_id, ": passer position in the events matches the tracking on only ",
+  if (!is.na(agree) && agree < 0.95) warning("match ", match_id, ": passer position in the events is within 0.5 m of the tracking on only ",
                                              round(100 * agree, 1), "% of passes")
   list(id = as.character(match_id), provider = "skillcorner", home = tr$home, away = tr$away, passes = passes,
        dir = meta$dir, pl = meta$pitch_length, pw = meta$pitch_width, fps = SKILLCORNER_FPS, origin = "centre",
-       meta = meta, passer_agreement = agree, n_no_target = attr(passes, "n_no_target"))
+       meta = meta, passer_agreement = agree, passer_agreement_exact = skillcorner_passer_agreement(tr, passes, tol = 0.011),
+       n_no_target = attr(passes, "n_no_target"))
 }

@@ -86,7 +86,7 @@ test_that("passes: player_possession rows ending in a pass with a targeted recei
 test_that("the bundle runs through the shared evaluator with hand-computed margins", {
   m <- load_skillcorner_match("900001", dir = FX)
   expect_equal(m$origin, "centre"); expect_equal(m$fps, 10); expect_equal(c(m$pl, m$pw), c(100, 60))
-  expect_equal(m$passer_agreement, 1); expect_equal(m$n_no_target, 1L)   # both passers sit where the events say
+  expect_equal(m$passer_agreement, 1); expect_equal(m$passer_agreement_exact, 1); expect_equal(m$n_no_target, 1L)
   r <- evaluate_tracking_match(m, n_mc = 400)
   expect_equal(nrow(r), 2)
   expect_equal(r$offside_flag, c(1L, 0L))
@@ -130,6 +130,9 @@ test_that("the passer-agreement check catches events that do not line up with th
   expect_equal(skillcorner_passer_agreement(tr, p), 1)
   wrong <- p; wrong$passer_x_event <- -wrong$passer_x_event                # as if the normalisation were not undone
   expect_equal(skillcorner_passer_agreement(tr, wrong), 0)
+  close <- p; close$passer_x_event <- close$passer_x_event + 0.3           # a 30 cm processing offset
+  expect_equal(skillcorner_passer_agreement(tr, close), 1)                 # passes at the 0.5 m default
+  expect_equal(skillcorner_passer_agreement(tr, close, tol = 0.011), 0)    # but is not bit-identical
   gone <- p; gone$start_frame <- 5L                                        # empty frame: nothing to check
   expect_true(is.na(skillcorner_passer_agreement(tr, gone)))
 })
@@ -147,8 +150,13 @@ test_that("summary measures and the markdown section are computed from the resul
   expect_equal(s$near_ok, 1); expect_equal(s$n_near, 1L)
   expect_equal(sum(s$mc_tab$flag_0) + sum(s$mc_tab$flag_1), 2L)
   out <- list(provider = "skillcorner", passes = r, fps = 10, sigma_t = 0.05, generated = as.Date("2026-01-01"),
-              matches = "900001", n_matches = 1L, n_passes_total = 2L, dir = m$dir %>% dplyr::mutate(game = "900001"))
+              matches = "900001", n_matches = 1L, n_passes_total = 2L, dir = m$dir %>% dplyr::mutate(game = "900001"),
+              match_info = tibble::tibble(game = "900001", pitch_length = 100, n_passes = 2L, n_no_target = 1L,
+                                          passer_agreement = 1, passer_agreement_exact = 1))
   lines <- skillcorner_section_lines(out)
+  # per-match row: 2 passes, 2 evaluated, 1 flagged, FP 1/1, second-last defender detected on 1 of 2 passes
+  expect_true(any(grepl("^\\| 900001 \\| 100 \\| 2 \\| 2 \\| 1 \\| 1.000 \\| 0.50 \\| 1.000 \\| 1.000 \\|$", lines)))
+  expect_true(any(grepl("form 1 stoppages", lines)))
   expect_true(any(grepl("^## SkillCorner", lines)))
   expect_true(any(grepl("1 frame \\(100 ms\\)", lines)))                 # 10 fps -> one frame is 100 ms
   expect_true(any(grepl("\\| true \\| 1.000 \\| ", lines)))
