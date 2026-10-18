@@ -17,7 +17,11 @@ onnxruntime==1.31.0            # CPU provider, pulled by rtmlib (MIT); the GPU b
                                # layered on top by colab/vision_env_probe.py on Linux only
 opencv-python==5.0.0.93        # (Apache-2.0); rtmlib also requires opencv-contrib-python
 opencv-contrib-python==5.0.0.93
-numpy==2.5.4                   # (BSD-3-Clause)
+numpy>=2.0.2,<2.8              # (BSD-3-Clause) NOT pinned on purpose: the Colab kernel
+                               # has numpy pre-imported (2.1.3 on 2026-10-17) and upgrading
+                               # it inside a live kernel breaks every compiled dependency;
+                               # the range is the intersection of the pins above (scipy
+                               # <2.8, trackers >=2.0.2). Fresh envs resolve to 2.5.4.
 pandas==3.0.6                  # (BSD-3-Clause)
 scipy==1.18.1                  # (BSD-3-Clause)
 pillow==13.0.0                 # (MIT-CMU)

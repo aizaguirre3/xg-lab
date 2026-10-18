@@ -3,12 +3,14 @@
 
     colab run --gpu L4 --timeout 600 -s varlab-vision-env colab/vision_env_probe.py --ref <commit-sha>
 
-On the VM it clones this repository at ``--ref`` (pinned), installs
-``requirements-vision.txt``, downloads the RF-DETR, SigLIP and RTMPose weights
-from their official hosts, renders the synthetic clip (coloured rectangles on
-green, 1920x1080, ``--frames`` frames) and reports installed versions, download
-sizes, per-stage throughput and peak GPU memory. ``colab run`` provisions, runs
-and releases the VM; nothing is left running.
+Stage 1 (in the Colab kernel): clone this repository at ``--ref`` (pinned) and
+install ``requirements-vision.txt`` plus the GPU build of ONNX Runtime. Stage 2
+(a fresh interpreter, started as a subprocess, because the Colab kernel already
+has numpy and friends imported and must not mix package versions): download the
+RF-DETR, SigLIP and RTMPose weights from their official hosts, render the
+synthetic clip (coloured rectangles on green, 1920x1080, ``--frames`` frames) and
+report installed versions, download sizes, per-stage throughput and peak GPU
+memory. ``colab run`` provisions, runs and releases the VM; nothing is left running.
 
 The synthetic rectangles are not people, so RF-DETR is expected to detect
 little or nothing on them; detection throughput does not depend on content, and
@@ -17,7 +19,8 @@ boxes. The CPU smoke pipeline is also run and scored with GS-HOTA to close the
 loader -> pipeline -> metric loop. No SoccerNet data is involved.
 
 Local check (Mac, CPU): ``python colab/vision_env_probe.py --repo-dir . --skip-clone
---skip-install --device cpu --frames 3 --detector-size nano``.
+--skip-install --device cpu --frames 3 --detector-size nano`` (add ``--two-stage``
+to exercise the subprocess hand-off as well).
 """
 from __future__ import annotations
 
@@ -48,7 +51,7 @@ def mb(n: int) -> float:
     return round(n / 2**20, 1)
 
 
-def main(argv=None) -> int:
+def parse_args(argv=None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--repo", default=DEFAULT_REPO)
     ap.add_argument("--ref", default=os.environ.get("VARLAB_REF", "feat/varlab-vision"))
@@ -56,6 +59,8 @@ def main(argv=None) -> int:
     ap.add_argument("--work-dir", default="/content/varlab_probe")
     ap.add_argument("--skip-clone", action="store_true")
     ap.add_argument("--skip-install", action="store_true")
+    ap.add_argument("--two-stage", action="store_true", help="hand the measurement to a fresh interpreter even without install")
+    ap.add_argument("--steps-json", default=None, help="(stage 2) timings recorded by stage 1")
     ap.add_argument("--device", default=None, help="cuda | cpu (default: cuda if available)")
     ap.add_argument("--detector-size", default="medium", choices=["nano", "small", "medium", "large"])
     ap.add_argument("--frames", type=int, default=30)
@@ -63,12 +68,76 @@ def main(argv=None) -> int:
     ap.add_argument("--height", type=int, default=1080)
     ap.add_argument("--no-pose", action="store_true")
     ap.add_argument("--out", default=None, help="JSON summary path (default <work-dir>/vision_env_probe.json)")
-    args = ap.parse_args(argv)
+    return ap.parse_args(argv)
 
+
+# ----------------------------------------------------------------------------
+# Stage 1: source + packages (runs in whatever interpreter `colab run` gives us)
+# ----------------------------------------------------------------------------
+
+
+def stage1(args: argparse.Namespace) -> int:
+    repo_dir = Path(args.repo_dir)
+    work = Path(args.work_dir); work.mkdir(parents=True, exist_ok=True)
+    steps: dict = {}
+    print("stage 1: python", sys.version.split()[0], platform.platform(), flush=True)
+    if not args.skip_clone:
+        t0 = time.time()
+        if not repo_dir.is_dir():
+            r = sh(["git", "clone", "--quiet", args.repo, str(repo_dir)])
+            if r.returncode:
+                print(r.stderr); return 1
+        sh(["git", "-C", str(repo_dir), "fetch", "--quiet", "origin", args.ref])
+        r = sh(["git", "-C", str(repo_dir), "checkout", "--quiet", args.ref])
+        if r.returncode:
+            print(r.stderr); return 1
+        steps["clone_s"] = round(time.time() - t0, 1)
+    head = sh(["git", "-C", str(repo_dir), "rev-parse", "HEAD"]).stdout.strip()
+    print("repo HEAD", head, flush=True)
+    if not args.skip_install:
+        t0 = time.time()
+        r = sh([sys.executable, "-m", "pip", "install", "-q", "-r", str(repo_dir / "requirements-vision.txt")])
+        steps["pip_install_s"] = round(time.time() - t0, 1)
+        if r.returncode:
+            print(r.stdout[-3000:], r.stderr[-3000:]); return 1
+        if sys.platform.startswith("linux"):
+            t0 = time.time()
+            r = sh([sys.executable, "-m", "pip", "install", "-q", "--no-deps", "--force-reinstall", "onnxruntime-gpu==1.31.0"])
+            steps["pip_onnxruntime_gpu_s"] = round(time.time() - t0, 1)
+            if r.returncode:
+                print("onnxruntime-gpu install failed (RTMPose will run on CPU):", r.stderr[-1000:])
+    steps_file = work / "stage1_steps.json"
+    steps_file.write_text(json.dumps({"steps": steps, "repo_head": head}))
+    cmd = [sys.executable, str(repo_dir / "colab" / "vision_env_probe.py"), "--repo-dir", str(repo_dir),
+           "--work-dir", str(work), "--skip-clone", "--skip-install", "--steps-json", str(steps_file),
+           "--frames", str(args.frames), "--width", str(args.width), "--height", str(args.height),
+           "--detector-size", args.detector_size]
+    if args.device:
+        cmd += ["--device", args.device]
+    if args.no_pose:
+        cmd.append("--no-pose")
+    if args.out:
+        cmd += ["--out", args.out]
+    print("stage 2 in a fresh interpreter:", " ".join(cmd), flush=True)
+    return subprocess.call(cmd)
+
+
+# ----------------------------------------------------------------------------
+# Stage 2: weights, synthetic clip, throughput, memory (fresh interpreter)
+# ----------------------------------------------------------------------------
+
+
+def stage2(args: argparse.Namespace) -> int:
     t_all = time.time()
+    repo_dir = Path(args.repo_dir)
+    work = Path(args.work_dir); work.mkdir(parents=True, exist_ok=True)
     R: dict = {"date": time.strftime("%Y-%m-%d %H:%M:%S"), "python": sys.version.split()[0],
                "platform": platform.platform(), "cpus": os.cpu_count(), "steps": {}}
-    print("python", R["python"], R["platform"], "cpus", R["cpus"])
+    if args.steps_json and Path(args.steps_json).is_file():
+        R.update(json.loads(Path(args.steps_json).read_text()))
+    else:
+        R["repo_head"] = sh(["git", "-C", str(repo_dir), "rev-parse", "HEAD"]).stdout.strip()
+    print("stage 2: python", R["python"], R["platform"], "cpus", R["cpus"], "HEAD", R["repo_head"], flush=True)
     smi = shutil.which("nvidia-smi")
     if smi:
         q = sh([smi, "--query-gpu=name,memory.total,driver_version", "--format=csv,noheader"])
@@ -81,50 +150,16 @@ def main(argv=None) -> int:
             R["ram"] = fh.readline().split()[1] + " kB"
     except OSError:
         R["ram"] = None
-
-    repo_dir = Path(args.repo_dir)
-    work = Path(args.work_dir); work.mkdir(parents=True, exist_ok=True)
-
-    # 1. Source at a pinned ref ------------------------------------------------
-    if not args.skip_clone:
-        t0 = time.time()
-        if not repo_dir.is_dir():
-            r = sh(["git", "clone", "--quiet", args.repo, str(repo_dir)])
-            if r.returncode:
-                print(r.stderr); return 1
-        sh(["git", "-C", str(repo_dir), "fetch", "--quiet", "origin", args.ref])
-        r = sh(["git", "-C", str(repo_dir), "checkout", "--quiet", args.ref])
-        if r.returncode:
-            print(r.stderr); return 1
-        R["steps"]["clone_s"] = round(time.time() - t0, 1)
-    head = sh(["git", "-C", str(repo_dir), "rev-parse", "HEAD"]).stdout.strip()
-    R["repo_head"] = head
-    print("repo HEAD", head)
-
-    # 2. Install the pinned requirements --------------------------------------
-    if not args.skip_install:
-        t0 = time.time()
-        r = sh([sys.executable, "-m", "pip", "install", "-q", "-r", str(repo_dir / "requirements-vision.txt")])
-        R["steps"]["pip_install_s"] = round(time.time() - t0, 1)
-        if r.returncode:
-            print(r.stdout[-3000:], r.stderr[-3000:]); return 1
-        if sys.platform.startswith("linux"):
-            t0 = time.time()
-            r = sh([sys.executable, "-m", "pip", "install", "-q", "--no-deps", "--force-reinstall", "onnxruntime-gpu==1.31.0"])
-            R["steps"]["pip_onnxruntime_gpu_s"] = round(time.time() - t0, 1)
-            if r.returncode:
-                print("onnxruntime-gpu install failed (RTMPose will run on CPU):", r.stderr[-1000:])
     sys.path.insert(0, str(repo_dir))
 
-    # 3. Versions --------------------------------------------------------------
+    # Versions ----------------------------------------------------------------
     import numpy as np
     import cv2
     import torch
+    from importlib.metadata import PackageNotFoundError, version as dist_version
 
     versions = {"torch": torch.__version__, "torch_cuda": torch.version.cuda, "cuda_available": torch.cuda.is_available(),
                 "numpy": np.__version__, "opencv": cv2.__version__}
-    from importlib.metadata import PackageNotFoundError, version as dist_version
-
     for mod, dist in (("torchvision", "torchvision"), ("rfdetr", "rfdetr"), ("supervision", "supervision"),
                       ("trackers", "trackers"), ("transformers", "transformers"), ("huggingface_hub", "huggingface-hub"),
                       ("rtmlib", "rtmlib"), ("onnxruntime", "onnxruntime"), ("pandas", "pandas"), ("scipy", "scipy")):
@@ -134,7 +169,7 @@ def main(argv=None) -> int:
         except PackageNotFoundError:
             versions[mod] = "installed (no dist metadata)"
         except Exception as e:  # noqa: BLE001
-            versions[mod] = f"IMPORT FAILED: {type(e).__name__}"
+            versions[mod] = f"IMPORT FAILED: {type(e).__name__}: {e}"[:200]
     try:
         versions["onnxruntime_gpu"] = dist_version("onnxruntime-gpu")
     except PackageNotFoundError:
@@ -145,7 +180,7 @@ def main(argv=None) -> int:
     except Exception:  # noqa: BLE001
         versions["onnxruntime_providers"] = []
     R["versions"] = versions
-    print("versions", json.dumps(versions))
+    print("versions", json.dumps(versions), flush=True)
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     pose_device = "cuda" if (device == "cuda" and "CUDAExecutionProvider" in versions["onnxruntime_providers"]) else "cpu"
     R["device"] = device; R["pose_device"] = pose_device
@@ -157,7 +192,7 @@ def main(argv=None) -> int:
     from varlab_vision.loaders import objects_frame, read_gsr_clip
     from varlab_vision.synthetic import render_synthetic_clip
 
-    # 4. Weights from their official hosts -----------------------------------
+    # Weights from their official hosts -----------------------------------------
     W: dict = {}
     t0 = time.time()
     det = pl.RFDETRDetector(size=args.detector_size, threshold=0.5, device=device)
@@ -190,7 +225,7 @@ def main(argv=None) -> int:
         print("rtmpose weights", W["rtmpose"], flush=True)
     R["weights"] = W
 
-    # 5. Synthetic clip ---------------------------------------------------------
+    # Synthetic clip --------------------------------------------------------------
     syn_root = work / "syn"
     shutil.rmtree(syn_root, ignore_errors=True)
     clip = render_synthetic_clip(syn_root, n_frames=args.frames, width=args.width, height=args.height,
@@ -203,7 +238,7 @@ def main(argv=None) -> int:
     n_people = int(sum(len(b) for b in gt_boxes.values()))
     R["synthetic"] = {"frames": len(frames), "size": f"{args.width}x{args.height}", "people_boxes": n_people}
 
-    # 6. Per-stage throughput on the real backends ------------------------------
+    # Per-stage throughput on the real backends -----------------------------------
     S: dict = {}
 
     def sync():
@@ -246,14 +281,14 @@ def main(argv=None) -> int:
     R["stages"] = S
     print("stages", json.dumps(S), flush=True)
 
-    # 7. Full production pipeline on the clip (code path; expect few detections)
+    # Full production pipeline on the clip (code path; expect few detections) ---
     prod = pl.VisionPipeline(detector=det, tracker=pl.ByteTrackTracker(frame_rate=25), embedder=emb, pose=pose,
                              projector=pl.HomographyProjector(clip.homography))
     rep = prod.run_clip(clip.clip_dir, work / "pred_prod" / "Labels-GameState.json", game_id="syn")
     R["production_run"] = rep.as_dict()
     print(rep.summary(), flush=True)
 
-    # 8. Smoke pipeline + GS-HOTA closed loop (CPU backends)
+    # Smoke pipeline + GS-HOTA closed loop (CPU backends) --------------------------
     smoke = pl.smoke_pipeline(projector=pl.HomographyProjector(clip.homography))
     rep_s = smoke.run_clip(clip.clip_dir, work / "pred_smoke" / "Labels-GameState.json", game_id="syn")
     pred_df = objects_frame(read_gsr_clip(rep_s.out_path))
@@ -263,19 +298,26 @@ def main(argv=None) -> int:
                           "deta_players": round(h_pl.deta, 4), "assa_players": round(h_pl.assa, 4)}
     print(rep_s.summary()); print("smoke GS-HOTA", R["smoke_gs_hota"], flush=True)
 
-    # 9. Memory ------------------------------------------------------------------
+    # Memory ----------------------------------------------------------------------
     if device == "cuda":
         R["gpu_mem"] = {"torch_max_allocated_mb": mb(torch.cuda.max_memory_allocated()),
                         "torch_max_reserved_mb": mb(torch.cuda.max_memory_reserved())}
         if smi:
             q = sh([smi, "--query-gpu=memory.used,memory.total", "--format=csv,noheader"])
             R["gpu_mem"]["nvidia_smi_used_total"] = q.stdout.strip()
-    R["total_seconds"] = round(time.time() - t_all, 1)
+    R["total_seconds_stage2"] = round(time.time() - t_all, 1)
     out = Path(args.out) if args.out else work / "vision_env_probe.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(R, indent=1, default=str))
     print("PROBE_SUMMARY_JSON", json.dumps(R, default=str), flush=True)
     return 0
+
+
+def main(argv=None) -> int:
+    args = parse_args(argv)
+    if args.two_stage or not args.skip_install:
+        return stage1(args)
+    return stage2(args)
 
 
 if __name__ == "__main__":

@@ -11,9 +11,11 @@ that clip finishes, so a kill loses at most the clip in flight. Re-run with
 ``--resume`` to continue from where the previous run stopped.
 
 Flow: ``colab new`` -> (optional) upload the Hugging Face token as a file ->
-``colab exec -f colab/vision_worker.py`` (defines ``setup`` and ``process_clip`` in
-the kernel) -> ``setup(ref=...)`` (clone the repo at the pinned commit, install the
-pinned requirements, download weights) -> per clip: ``process_clip(...)`` then
+``colab install -r requirements-vision.txt`` -> ``colab restart-kernel`` (the Colab
+kernel has numpy and friends pre-imported; installing and then importing in the
+same kernel mixes versions) -> ``colab exec -f colab/vision_worker.py`` (defines
+``setup`` and ``process_clip`` in the fresh kernel) -> ``setup(ref=...)`` (clone the
+repo at the pinned commit, GPU ONNX Runtime, download weights) -> per clip: ``process_clip(...)`` then
 ``colab download`` of its ``Labels-GameState.json`` and ``report.json`` ->
 ``colab stop`` in a ``finally`` -> ``colab sessions`` printed so the operator can
 confirm nothing is left running.
@@ -48,6 +50,7 @@ DEFAULT_REPO = "https://github.com/aizaguirre3/xg-lab.git"
 REMOTE_OUT = "/content/varlab_out"
 REMOTE_TOKEN = "/content/.hf_token"
 WORKER = HERE / "vision_worker.py"
+REQUIREMENTS = HERE.parent / "requirements-vision.txt"
 
 
 @dataclass
@@ -97,6 +100,12 @@ class ColabSession:
 
     def sessions(self) -> str:
         return self._run("sessions", check=False).stdout
+
+    def install(self, requirements: Path) -> None:
+        self._run("install", "-s", self.name, "-r", str(requirements))
+
+    def restart_kernel(self) -> None:
+        self._run("restart-kernel", "-s", self.name)
 
     def exec_file(self, path: Path, timeout: float) -> CmdResult:
         return self._run("exec", "-s", self.name, "-f", str(path), "--timeout", str(timeout))
@@ -182,6 +191,8 @@ def run(args: argparse.Namespace, runner: Optional[Runner] = None) -> int:
                     pass
         else:
             print("[run_clips] HF_TOKEN not set: the worker will try Colab Secrets, else gated downloads fail")
+        session.install(REQUIREMENTS)
+        session.restart_kernel()
         session.exec_file(WORKER, timeout=args.setup_timeout)
         setup_call = (f"setup(ref={args.ref!r}, repo={args.repo!r}, detector_size={args.detector_size!r}, "
                       f"with_pose={not args.no_pose!r}, hf_dataset={args.hf_dataset!r}, "

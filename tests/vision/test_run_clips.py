@@ -56,6 +56,9 @@ def test_run_processes_each_clip_then_downloads_and_stops(tmp_path: Path, monkey
     assert code == 0
     subs = [c[0][1] for c in fake.calls]
     assert subs[0] == "new" and subs[-2] == "stop" and subs[-1] == "sessions"
+    # install the pins, restart the kernel, then define the worker and run setup
+    assert subs.index("install") < subs.index("restart-kernel") < subs.index("exec")
+    assert [c for c, _ in fake.calls if c[1] == "install"][0][-1].endswith("requirements-vision.txt")
     execs = [s for c, s in fake.calls if c[1] == "exec" and s]
     assert any("setup(" in s and "abc123" in s for s in execs)
     assert [s for s in execs if "process_clip(" in s] == [
@@ -134,3 +137,4 @@ def test_dry_run_prints_commands_without_a_runner(capsys):
     code = rc.main(["--clips", "A", "--ref", "abc", "--out", "/tmp/ignored", "--dry-run"])
     captured = capsys.readouterr().out
     assert code == 0 and "colab new" in captured and "process_clip('A'" in captured and "colab stop" in captured
+    assert "colab install" in captured and "colab restart-kernel" in captured

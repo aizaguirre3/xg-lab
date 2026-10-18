@@ -58,10 +58,27 @@ def _read_token() -> str | None:
     return None
 
 
+def _check_numpy_consistent() -> None:
+    """Refuse to continue when the imported numpy is not the one on disk (kernel needs a restart)."""
+    import sys as _sys
+    from importlib.metadata import version
+
+    mod = _sys.modules.get("numpy")
+    if mod is not None and mod.__version__ != version("numpy"):
+        raise RuntimeError(f"numpy {mod.__version__} is imported but {version('numpy')} is installed: "
+                           "run `colab restart-kernel -s <session>` and call setup() again")
+
+
 def setup(ref: str, repo: str = "https://github.com/aizaguirre3/xg-lab.git", detector_size: str = "medium",
           with_pose: bool = True, hf_dataset: str = "SoccerNet/SN-GSR-2025", hf_revision: str = "main",
-          clip_pattern: str = "{split}/{clip}/*", device: str | None = None) -> dict:
-    """Clone at ``ref``, install the pinned requirements, load the models. Idempotent per kernel."""
+          clip_pattern: str = "{split}/{clip}/*", device: str | None = None, install: bool = False,
+          gpu_onnxruntime: bool = True) -> dict:
+    """Clone at ``ref``, (optionally) install the pinned requirements, load the models. Idempotent per kernel.
+
+    ``install=False`` because colab/run_clips.py installs with ``colab install`` and
+    restarts the kernel first; installing inside a kernel that already imported
+    numpy mixes versions, which ``_check_numpy_consistent`` catches.
+    """
     t0 = time.time()
     if not REPO_DIR.is_dir():
         _sh(["git", "clone", "--quiet", repo, str(REPO_DIR)])
@@ -70,11 +87,13 @@ def setup(ref: str, repo: str = "https://github.com/aizaguirre3/xg-lab.git", det
     head = subprocess.run(["git", "-C", str(REPO_DIR), "rev-parse", "HEAD"], check=True, text=True,
                           capture_output=True).stdout.strip()
     print("repo HEAD", head)
-    if not _STATE.get("installed"):
+    if install and not _STATE.get("installed"):
         _sh([sys.executable, "-m", "pip", "install", "-q", "-r", str(REPO_DIR / "requirements-vision.txt")])
-        if sys.platform.startswith("linux"):
-            _sh([sys.executable, "-m", "pip", "install", "-q", "--no-deps", "--force-reinstall", "onnxruntime-gpu==1.31.0"])
         _STATE["installed"] = True
+    if gpu_onnxruntime and sys.platform.startswith("linux") and not _STATE.get("gpu_ort") and "onnxruntime" not in sys.modules:
+        _sh([sys.executable, "-m", "pip", "install", "-q", "--no-deps", "--force-reinstall", "onnxruntime-gpu==1.31.0"])
+        _STATE["gpu_ort"] = True
+    _check_numpy_consistent()
     if str(REPO_DIR) not in sys.path:
         sys.path.insert(0, str(REPO_DIR))
     token = _read_token()

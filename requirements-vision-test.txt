@@ -2,7 +2,7 @@
 # smoke pipeline). No model weights, no torch. Same pins as requirements-vision.txt.
 # opencv-python (not -headless) because `trackers` requires it by name; installing
 # both flavours into one environment clobbers the cv2 package.
-numpy==2.5.4
+numpy==2.5.4                   # fresh environments only; see the note in requirements-vision.txt
 pandas==3.0.6
 scipy==1.18.1
 opencv-python==5.0.0.93
