@@ -1,0 +1,11 @@
+# The CPU-only subset needed by tests/vision (loaders, GS-HOTA, synthetic clip,
+# smoke pipeline). No model weights, no torch. Same pins as requirements-vision.txt.
+# opencv-python (not -headless) because `trackers` requires it by name; installing
+# both flavours into one environment clobbers the cv2 package.
+numpy==2.5.4
+pandas==3.0.6
+scipy==1.18.1
+opencv-python==5.0.0.93
+supervision==0.31.0
+trackers==2.6.1
+pytest>=8

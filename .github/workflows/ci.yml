@@ -67,3 +67,27 @@ jobs:
 
       - name: Run testthat
         run: Rscript -e 'source("R/utils.R"); for (f in list.files("R", pattern = "^0[6-9]|^1[01]", full.names = TRUE)) source(f); testthat::test_dir("tests")'
+
+  # VAR-Lab M4 vision scaffold: loaders, GS-HOTA adapter and the CPU smoke
+  # pipeline on a synthetic clip. Installs only requirements-vision-test.txt
+  # (numpy/pandas/scipy/OpenCV/supervision/trackers, about a minute); the full
+  # requirements-vision.txt (torch + CUDA wheels, model weights) stays out of CI.
+  vision:
+    name: Python 3.12 (varlab_vision, CPU subset)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-vision-test.txt
+
+      - name: Install the CPU test subset (no torch, no weights)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-vision-test.txt
+
+      - name: Run the vision tests
+        run: pytest tests/vision -q

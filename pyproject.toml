@@ -20,7 +20,7 @@ dependencies = [
 test = ["pytest"]
 
 [tool.setuptools]
-packages = ["varlab"]
+packages = ["varlab", "varlab_vision"]  # varlab_vision deps: requirements-vision.txt
 
 [tool.pytest.ini_options]
 testpaths = ["tests/python"]
