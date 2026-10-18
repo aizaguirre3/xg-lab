@@ -1,0 +1,30 @@
+{
+  "id": 900001,
+  "date_time": "2025-01-01T00:00:00Z",
+  "home_team": {"id": 1, "name": "Home Fixture FC", "short_name": "Home", "acronym": "HOM"},
+  "away_team": {"id": 2, "name": "Away Fixture FC", "short_name": "Away", "acronym": "AWY"},
+  "match_periods": [
+    {"period": 1, "name": "period_1", "start_frame": 0, "end_frame": 5, "duration_frames": 5, "duration_minutes": 0.01},
+    {"period": 2, "name": "period_2", "start_frame": 10, "end_frame": 15, "duration_frames": 5, "duration_minutes": 0.01}
+  ],
+  "home_team_side": ["left_to_right", "right_to_left"],
+  "players": [
+    {"id": 101, "team_id": 1, "number": 8,  "player_role": {"id": 1, "acronym": "CM", "name": "Centre Midfielder"}},
+    {"id": 102, "team_id": 1, "number": 9,  "player_role": {"id": 2, "acronym": "CF", "name": "Centre Forward"}},
+    {"id": 103, "team_id": 1, "number": 6,  "player_role": {"id": 3, "acronym": "DM", "name": "Defensive Midfielder"}},
+    {"id": 104, "team_id": 1, "number": 4,  "player_role": {"id": 4, "acronym": "CB", "name": "Centre Back"}},
+    {"id": 105, "team_id": 1, "number": 5,  "player_role": {"id": 4, "acronym": "CB", "name": "Centre Back"}},
+    {"id": 106, "team_id": 1, "number": 3,  "player_role": {"id": 5, "acronym": "LB", "name": "Left Back"}},
+    {"id": 107, "team_id": 1, "number": 1,  "player_role": {"id": 6, "acronym": "GK", "name": "Goalkeeper"}},
+    {"id": 201, "team_id": 2, "number": 1,  "player_role": {"id": 6, "acronym": "GK", "name": "Goalkeeper"}},
+    {"id": 202, "team_id": 2, "number": 4,  "player_role": {"id": 4, "acronym": "CB", "name": "Centre Back"}},
+    {"id": 203, "team_id": 2, "number": 5,  "player_role": {"id": 4, "acronym": "CB", "name": "Centre Back"}},
+    {"id": 204, "team_id": 2, "number": 2,  "player_role": {"id": 7, "acronym": "RB", "name": "Right Back"}},
+    {"id": 205, "team_id": 2, "number": 6,  "player_role": {"id": 3, "acronym": "DM", "name": "Defensive Midfielder"}},
+    {"id": 206, "team_id": 2, "number": 8,  "player_role": {"id": 1, "acronym": "CM", "name": "Centre Midfielder"}},
+    {"id": 207, "team_id": 2, "number": 9,  "player_role": {"id": 2, "acronym": "CF", "name": "Centre Forward"}}
+  ],
+  "ball": {"trackable_object": 55},
+  "pitch_length": 100,
+  "pitch_width": 60
+}
