@@ -66,4 +66,4 @@ jobs:
             any::testthat
 
       - name: Run testthat
-        run: Rscript -e 'source("R/utils.R"); for (f in list.files("R", pattern = "^0[6-9]|^1[01]", full.names = TRUE)) source(f); testthat::test_dir("tests")'
+        run: Rscript -e 'source("R/utils.R"); for (f in list.files("R", pattern = "^0[6-9]|^1[0-2]", full.names = TRUE)) source(f); testthat::test_dir("tests")'

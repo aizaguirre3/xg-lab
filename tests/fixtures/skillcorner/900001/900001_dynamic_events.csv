@@ -1,0 +1,7 @@
+event_id,index,match_id,frame_start,frame_end,period,attacking_side,event_type,event_subtype,end_type,player_id,player_name,team_id,x_end,y_end,pass_outcome,player_targeted_id,player_targeted_x_pass,player_targeted_y_pass,player_targeted_x_reception,player_targeted_y_reception,last_defensive_line_x_end,fully_extrapolated,is_pass_reception_matched
+8_0,0,900001,0,2,1,left_to_right,player_possession,,pass,101,Home Passer,1,10,0,offside,102,30,5,,,28,False,True
+1_0,1,900001,0,2,1,left_to_right,off_ball_run,run_ahead_of_the_ball,,102,Home Runner,1,30,5,,,,,,,,False,
+7_0,2,900001,1,2,1,left_to_right,passing_option,,,103,Home Option,1,0,-5,,,,,,,,False,
+8_1,3,900001,2,3,1,right_to_left,player_possession,,pass,206,Away Passer,2,-10,-2,successful,207,32,0,33,-1,30,False,True
+8_2,4,900001,3,4,1,right_to_left,player_possession,,carry,207,Away Carrier,2,33,-1,,,,,,,,False,
+8_3,5,900001,4,4,1,right_to_left,player_possession,,pass,207,Away Clearance,2,33,-1,unsuccessful,,,,,,30,False,False

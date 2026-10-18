@@ -12,7 +12,7 @@
 #   Rscript run_all.R            # run all phases (skips ingest if cache exists)
 #   XG_FORCE_INGEST=1 Rscript run_all.R   # re-pull StatsBomb data
 #   XG_MAX_MATCHES=300 Rscript run_all.R  # smaller/faster data pull
-#   XG_VARLAB=1 Rscript run_all.R         # also run the VAR-Lab phases (6-10)
+#   XG_VARLAB=1 Rscript run_all.R         # also run the VAR-Lab phases (6-11)
 # -----------------------------------------------------------------------------
 set.seed(7406)
 options(stringsAsFactors = FALSE)
@@ -26,7 +26,7 @@ for (f in sprintf("R/%s", c("00_ingest.R", "01_features.R", "02_eda.R",
                             "03_models.R", "04_calibration.R", "05_finishing_skill.R",
                             "06_ingest_decisions.R", "07_decision_models.R",
                             "08_referee_effects.R", "09_offside_engine.R",
-                            "10_offside_360.R", "11_offside_tracking.R")))
+                            "10_offside_360.R", "12_read_skillcorner.R", "11_offside_tracking.R")))
   source(f)
 
 # Phase 0: unit tests (fail fast on a broken helper)
@@ -60,6 +60,10 @@ if (identical(Sys.getenv("XG_VARLAB"), "1")) {
     message("== Phase 10: offside engine on Metrica tracking =="); run_offside_tracking()
   } else message("Phase 10: Metrica sample data not found under data/external/metrica; skipping.",
                  " (git clone --depth 1 https://github.com/metrica-sports/sample-data.git data/external/metrica)")
+  if (length(skillcorner_matches())) {
+    message("== Phase 11: offside engine on SkillCorner tracking =="); run_offside_skillcorner()
+  } else message("Phase 11: no fetched SkillCorner tracking under data/external/skillcorner; skipping.",
+                 " (see docs/HANDOFF.md section 4 for the pinned clone and the Git LFS pull)")
 }
 
 message("\nPipeline complete. Figures in figures/, tables in data/*.rds.")

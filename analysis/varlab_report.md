@@ -2,7 +2,7 @@
 
 Status: layers 1 and 2 of the plan in [`docs/var_vision_scope.md`](../docs/var_vision_scope.md) (milestones M0 to M3). Layer 3 (video) is not started: it needs SoccerNet access, Python/PyTorch and a GPU, none of which this build environment has.
 
-Data: StatsBomb Open Data (non-commercial licence, no redistribution; attribution and logo required), 426 matches with 360 freeze frames across 12 competition-seasons; Metrica Sports sample tracking data (2 anonymised games; no formal licence, Metrica asks for responsible use and acknowledgement). Nothing here is, or claims to be, VAR-grade: official systems track 29 body points per player at 50 Hz with a 500 Hz ball sensor; this project works on 2D torso-level snapshots and event timestamps.
+Data: StatsBomb Open Data (non-commercial licence, no redistribution; attribution and logo required), 426 matches with 360 freeze frames across 12 competition-seasons; Metrica Sports sample tracking data (2 anonymised games; no formal licence, Metrica asks for responsible use and acknowledgement); SkillCorner Open Data (20 A-League 2024/25 matches of 10 fps broadcast tracking with dynamic events, MIT licence, SkillCorner asks for credit). Nothing here is, or claims to be, VAR-grade: official systems track 29 body points per player at 50 Hz with a 500 Hz ball sensor; this project works on 2D torso-level snapshots and event timestamps.
 
 ## Headline results
 
@@ -77,6 +77,23 @@ Only one provider-flagged offside follows a pass in these games (the other follo
 
 ![Tracking margins](../figures/offside_tracking_margins.png)
 
+
+**SkillCorner broadcast tracking (10 fps, 20 A-League matches, `R/12_read_skillcorner.R`).** The same evaluator runs on
+SkillCorner's open data once the reader has turned a match into the tracking bundle: 22 players and the ball whenever the ball
+is in play, each player flagged detected or extrapolated, passes from the dynamic events with the targeted receiver, and
+`pass_outcome == "offside"` as the provider's flag. Two format facts the reader had to establish on the data: the event
+coordinates are normalised so the possession team attacks toward +x (right-to-left rows are the tracking rotated by 180
+degrees), and in half of the matches the event positions sit a few centimetres from the tracking rather than on it. Across
+16,055 passes the false-positive rate with the targeted receiver is 0.012 (0.002 on the optical Metrica data), the
+nearest-to-end-point heuristic still finds the receiver in 97.7% of passes, and one frame of kick-time error, now 100 ms, moves
+the margin by a median of 0.11 m (0.04 m at 25 Hz) and by more than 5 cm in 73.8% of passes. The 62 offside flags are
+not a frame-precise label: they fall into 52 stoppages and both teams' passes around a stoppage are flagged, so the engine's
+agreement with them (the targeted receiver is beyond the line in 11.5% of stoppages, the furthest-forward team-mate in
+34.6%) says as much about the label and about extrapolated defenders as about the geometry. SkillCorner's own
+`last_defensive_line_x_end` matches the engine's second-last opponent to within 50 cm on 94.1% of passes, which is the
+check that the reader's frames and coordinates are right. Full tables in
+[`offside_tracking.md`](offside_tracking.md).
+
 ## Official VAR vs. this project
 
 | | Official SAOT (FIFA 2022 spec; Premier League and La Liga similar) | VAR-Lab |
@@ -100,7 +117,8 @@ Rscript R/07_decision_models.R           # card / penalty models, bootstrap CIs
 Rscript R/08_referee_effects.R           # referee shrinkage + persistence
 Rscript R/10_offside_360.R               # Law 11 engine on 360 frames
 git clone --depth 1 https://github.com/metrica-sports/sample-data.git data/external/metrica
-Rscript R/11_offside_tracking.R          # Law 11 engine on 25 Hz tracking
+# SkillCorner: clone, pin and fetch the 20 LFS tracking files as docs/HANDOFF.md section 4 describes, then
+Rscript R/11_offside_tracking.R          # Law 11 engine on 25 Hz Metrica and 10 fps SkillCorner tracking
 # or everything after the xG pipeline:  XG_VARLAB=1 Rscript run_all.R
 Rscript -e 'for (f in list.files("R", full.names = TRUE)) source(f); testthat::test_dir("tests")'
 ```
