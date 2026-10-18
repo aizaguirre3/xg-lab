@@ -130,6 +130,7 @@ access and a GPU are available. Layers 1 and 2 are built and evaluated
 | P(penalty \| foul in own box) | 143 of 148 own-box fouls were penalties: no model beats the base rate, reported as such |
 | Referee strictness, glmer shrinkage | SD 0.17 logit; split-half persistence r 0.20 (p 0.17); referee identity adds nothing out of sample |
 | Law 11 engine vs. referee offside calls on 360 frames | 91% agreement beyond 2 yards (97% with the keeper in frame); abstains on 24% of frames, 91% accurate on the rest |
+| Law 11 engine on continuous tracking | Metrica 25 Hz optical, 1,763 passes: 0.2% false positives with the true receiver, one frame (40 ms) moves the margin 0.04 m. SkillCorner 10 fps broadcast, 20 matches, 16,055 passes: 1.2% false positives, one frame (100 ms) moves it 0.11 m; the provider's offside flags mark both teams' passes around a stoppage |
 
 ```
 R/06_ingest_decisions.R  fouls / cards / offside events + 360 join + referee
@@ -137,7 +138,8 @@ R/07_decision_models.R   calibrated card & penalty models, bootstrap CIs, absten
 R/08_referee_effects.R   referee random intercepts, persistence, out-of-sample value
 R/09_offside_engine.R    pure Law 11 geometry + Monte-Carlo uncertainty (unit-tested)
 R/10_offside_360.R       engine vs. calls on 360 frames, visibility strata, psychometric fit
-R/11_offside_tracking.R  engine on 25 Hz Metrica tracking: kick-frame ambiguity
+R/11_offside_tracking.R  engine on continuous tracking (25 Hz Metrica, 10 fps SkillCorner): kick-frame ambiguity
+R/12_read_skillcorner.R  reader for SkillCorner open broadcast tracking (JSONL + dynamic events)
 ```
 
 Run with `XG_VARLAB=1 Rscript run_all.R` (pulls ~4 GB of events + 360 frames).
@@ -166,3 +168,13 @@ The 25 Hz tracking used by `R/11_offside_tracking.R` is the
 [Metrica Sports sample data](https://github.com/metrica-sports/sample-data)
 (two anonymised games; no formal licence, Metrica asks for responsible use and
 acknowledgement).
+
+The 10 fps broadcast tracking read by `R/12_read_skillcorner.R` is the
+[SkillCorner Open Data](https://github.com/SkillCorner/opendata) release of 20
+A-League 2024/25 matches (tracking, dynamic events and match metadata), used at
+commit `4340d274572876239c154c90bc507a9b3250a656`. It is published under the
+[MIT licence](https://github.com/SkillCorner/opendata/blob/4340d274572876239c154c90bc507a9b3250a656/LICENSE)
+(copyright SkillCorner); SkillCorner asks that users credit SkillCorner, which
+this project does here and in the analysis, and invites notification of work
+built on the data. Only the data files are read; nothing from that repository's
+code is executed, and the data is not redistributed (`data/` is gitignored).
