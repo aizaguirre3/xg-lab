@@ -4,26 +4,28 @@ Classical and licence-free: no learned keypoint detector, no code from
 PnLCalib (GPL-2) or TrackLab / sn-gamestate (GPL-3). The chain is
 
 1. ``white_line_mask``: bright, low-saturation pixels next to grass.
-2. ``extract_lines``: probabilistic Hough segments, merged into one line per
-   marking and refitted to the mask pixels at sub-pixel precision (PCA with
-   one outlier-rejection pass).
+2. ``extract_lines``: probabilistic Hough segments as seeds; each seed is refitted to the
+   mask pixels around it by a robust cross-section-centroid fit (Theil-Sen + Tukey, with a
+   band that follows the stroke thickness) and then *peeled*: its pixels are removed from
+   the live mask so no second line can be found on the same marking.
 3. ``search_homography``: a RANSAC-style hypothesis search over assignments of
    four image lines to two ``x = const`` and two ``y = const`` lines of the
    :class:`~varlab_vision.pitch_model.PitchModel`. Every hypothesis is scored on
    all detected lines: an image line is an inlier of a model line when its
    endpoints lie within ``tau_px`` of the projected model line *and* its
    back-projection lies on a drawn segment of that line (not on the invisible
-   part of the infinite line). The search is vectorised (batched DLT by SVD).
+   part of the infinite line). The search is vectorised (batched DLT) and the scorer is
+   invariant to the scale and sign a caller gives the homography.
 4. ``refine_homography``: Levenberg-Marquardt on the eight homography
    parameters, minimising the pixel distance between the inlier segments'
    endpoints and the projected model lines.
-5. ``FrameCalibrator``: per-frame state. Frame t is first *tracked* from frame
-   t-1 (model lines projected with the previous homography, matched to the new
-   segments, refined), falling back to the global search when tracking has too
-   few correspondences, and both are preceded by a shot-cut test (mean
-   absolute difference of the downscaled grey frames above ``cut_threshold``
-   resets all state). Consecutive solutions are blended (exponential smoothing)
-   unless a cut was detected.
+5. ``FrameCalibrator``: per-frame state. A shot-cut test (grey thumbnail difference or
+   hue-saturation histogram distance) clears all state. Otherwise frame t is *tracked*
+   from the filter's one-step prediction (then from the previous solution), falling back
+   to the global search when tracking has too few correspondences or keeps clearly fewer
+   inliers than the last frame (a false lock). A tracked fit goes through an alpha-beta
+   (constant-velocity) filter on the eight homography parameters, so a steady pan is
+   followed without lag while fit noise is averaged on a static shot.
 
 A frame is **calibrated** only when at least ``min_inliers`` lines match with at
 least two from each family (otherwise the homography is unconstrained along one
@@ -109,6 +111,9 @@ class CalibrationResult:
     reprojection_error_m: float = float("nan")
     shot_cut: bool = False
     note: str = ""
+    # the markings the frame was calibrated from, kept so a caller can re-score a
+    # different homography (the tracker's filtered one) without extracting again
+    lines: List["ImageLine"] = field(default_factory=list, repr=False, compare=False)
 
     @property
     def ok(self) -> bool:
@@ -261,6 +266,38 @@ def white_line_mask(frame_bgr: np.ndarray, white_max_sat: int = 70, white_min_va
     return (white & (green > 0)).astype(np.uint8)
 
 
+def line_weights(frame_bgr: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Soft whiteness (0-1, float32) of the pixels around the marking mask.
+
+    A binary mask throws away the sub-pixel position of a stroke: a 3 px line whose
+    centre sits at row 100.0 and one at row 100.25 threshold to the same rows, so a
+    near-horizontal line such as the far touchline keeps a constant bias of up to a
+    quarter of a pixel along its whole length, which is half a metre on the far
+    side of a wide shot. The minimum colour channel is linear in how much of a pixel
+    the white paint covers (grass is dark in at least one channel, paint is not), so
+    it is rescaled between the grass level around the mask and the paint level inside
+    it and used as the weight of each pixel in the line fit. Zero away from the mask
+    (3 px reach). Falls back to the binary mask when the mask is too small to
+    calibrate against.
+    """
+    import cv2
+
+    on = mask > 0
+    if int(on.sum()) < 60:
+        return mask.astype(np.float32)
+    m = np.minimum(np.minimum(frame_bgr[..., 0], frame_bgr[..., 1]), frame_bgr[..., 2])
+    near = cv2.dilate(mask, np.ones((7, 7), np.uint8)) > 0
+    ring = cv2.dilate(mask, np.ones((17, 17), np.uint8)) > 0
+    ring &= ~near
+    hi = float(np.percentile(m[on], 90))
+    lo = float(np.median(m[ring])) if int(ring.sum()) >= 60 else 0.0
+    if hi - lo < 20.0:
+        return mask.astype(np.float32)
+    w = np.clip((m.astype(np.float32) - lo) / (hi - lo), 0.0, 1.0)
+    w[~near] = 0.0
+    return w
+
+
 def _fit_line_pca(pts: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """Total-least-squares line through (N, 2) points: (abc normalised, direction)."""
     c = pts.mean(axis=0)
@@ -271,136 +308,250 @@ def _fit_line_pca(pts: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     return abc, d
 
 
+def _band_select(pix: np.ndarray, ys: np.ndarray, alive: np.ndarray, c: np.ndarray, u: np.ndarray,
+                 lo: float, hi: float, band: float) -> np.ndarray:
+    """Indices of the live mask pixels within ``band`` of the line (centre ``c``,
+    direction ``u``) whose position along it lies in ``[lo, hi]``.
+
+    ``pix`` is row-major (``np.nonzero`` order) so ``ys`` is sorted and the
+    candidate rows form one contiguous slice: the cost scales with the rows the
+    line crosses, not with the whole mask.
+    """
+    e0, e1 = c + u * lo, c + u * hi
+    r = band + 1.5
+    i0 = int(np.searchsorted(ys, int(math.floor(min(e0[1], e1[1]) - r)), side="left"))
+    i1 = int(np.searchsorted(ys, int(math.ceil(max(e0[1], e1[1]) + r)), side="right"))
+    if i1 <= i0:
+        return np.zeros(0, dtype=np.int64)
+    rel = pix[i0:i1] - c
+    t = rel @ u
+    s = rel[:, 1] * u[0] - rel[:, 0] * u[1]
+    m = alive[i0:i1] & (np.abs(s) <= band) & (t >= lo) & (t <= hi)
+    return np.nonzero(m)[0] + i0
+
+
+def _fit_profile(pts: np.ndarray, wts: np.ndarray, c: np.ndarray, u: np.ndarray, bin_px: float = 6.0,
+                 tukey_px: float = 1.5) -> Optional[Tuple[np.ndarray, np.ndarray, float, float, float, int]]:
+    """Robust line fit to the pixels of one stroke through its cross-section centroids.
+
+    The pixels (with soft weights ``wts``, 1 for a binary mask) are binned along the
+    seed direction ``u`` (bins of ``bin_px``), each bin is reduced to its centroid, and
+    a line is fitted to the centroids by Theil-Sen followed by Tukey-biweight
+    reweighting. Unlike a plain PCA over the pixels this (a) is unbiased by how the
+    band cuts a tilted stroke, because every centroid is taken across the full
+    cross-section, and (b) rejects the bins at a T-junction or a corner where another
+    marking adds pixels, which would drag a PCA line off a short marking by one to two
+    pixels. A bin's centre is the weighted mean of its pixels within the stroke
+    half-width of the bin's weighted median: the median finds the stroke in spite of
+    a stub on one side, the weighted mean then resolves its position to a fraction of
+    a pixel.
+
+    Returns ``(centre, direction, t_lo, t_hi, thickness_px, n_pixels)`` with the
+    extent and pixel count taken from the inlier bins only (``thickness_px`` is the
+    pixel support per unit length, used to size the band), or ``None`` when fewer
+    than four bins carry data.
+    """
+    n = np.array([-u[1], u[0]])
+    rel = pts - c
+    t = rel @ u
+    s_ = rel @ n
+    k = np.floor((t - t.min()) / bin_px).astype(np.int64)
+    nb = int(k.max()) + 1
+    cnt = np.bincount(k, minlength=nb)
+    wsum = np.bincount(k, weights=wts, minlength=nb)
+    ok = (cnt >= 3) & (wsum >= 2.5)
+    if ok.sum() < 4:
+        return None
+    # weighted median of the cross-section coordinate per bin
+    order = np.lexsort((s_, k))
+    cw = np.cumsum(wts[order])
+    first = np.concatenate([[0], np.cumsum(cnt)[:-1]])
+    before = np.where(first > 0, cw[np.maximum(first - 1, 0)], 0.0)
+    med = s_[order][np.minimum(np.searchsorted(cw, before + 0.5 * wsum, side="left"), len(order) - 1)]
+    support = np.median(cnt[ok][1:-1] if ok.sum() > 3 else cnt[ok]) / bin_px
+    gate = np.abs(s_ - med[k]) <= max(1.5, 0.5 * support + 1.0)
+    gw = wts * gate
+    den = np.bincount(k, weights=gw, minlength=nb)
+    sm = (np.bincount(k, weights=gw * s_, minlength=nb) / np.maximum(den, 1e-9))[ok]
+    tm = (np.bincount(k, weights=gw * t, minlength=nb) / np.maximum(den, 1e-9))[ok]
+    wc = den[ok]
+    m = len(sm)
+    if m > 48:  # Theil-Sen on a thinned set keeps the pair count bounded
+        sub = np.linspace(0, m - 1, 48).astype(int)
+    else:
+        sub = np.arange(m)
+    ii, jj = np.triu_indices(len(sub), k=1)
+    dt = tm[sub][jj] - tm[sub][ii]
+    good = dt > 2.0 * bin_px
+    if not good.any():
+        return None
+    gamma = float(np.median((sm[sub][jj] - sm[sub][ii])[good] / dt[good]))
+    alpha = float(np.median(sm - gamma * tm))
+    for _ in range(4):
+        r = sm - (alpha + gamma * tm)
+        wt = wc * np.clip(1.0 - (r / tukey_px) ** 2, 0.0, None) ** 2
+        sw = wt.sum()
+        if sw <= 0:
+            return None
+        tbar, sbar = (wt * tm).sum() / sw, (wt * sm).sum() / sw
+        den2 = (wt * (tm - tbar) ** 2).sum()
+        gamma = float((wt * (tm - tbar) * (sm - sbar)).sum() / den2) if den2 > 1e-9 else gamma
+        alpha = float(sbar - gamma * tbar)
+    r = sm - (alpha + gamma * tm)
+    inl_bin = np.zeros(nb, dtype=bool)
+    ok_idx = np.nonzero(ok)[0]
+    inl_bin[ok_idx[np.abs(r) <= 0.7 * tukey_px]] = True
+    if inl_bin.sum() < 3:
+        return None
+    nrm = math.sqrt(1.0 + gamma * gamma)
+    u2 = (u + gamma * n) / nrm
+    c2 = c + alpha * n
+    keep = inl_bin[k]
+    tt = (pts[keep] - c2) @ u2
+    cn = cnt[inl_bin]
+    thickness = float(np.median(cn[1:-1] if len(cn) > 3 else cn) / bin_px)
+    return c2, u2, float(tt.min()), float(tt.max()), thickness, int(keep.sum())
+
+
 def extract_lines(mask: np.ndarray, min_length_px: float = 25.0, hough_threshold: int = 30,
                   max_gap_px: int = 10, merge_angle_deg: float = 2.0, merge_dist_px: float = 3.0,
-                  band_px: float = 2.0, min_coverage: float = 0.6, max_lines: int = 24) -> List[ImageLine]:
-    """Hough segments -> merged, sub-pixel lines with their visible extent.
+                  band_px: float = 3.5, min_coverage: float = 0.6, max_lines: int = 24,
+                  max_candidates: int = 150, bridge: float = 3.0,
+                  weights: Optional[np.ndarray] = None) -> List[ImageLine]:
+    """Hough candidates -> one sub-pixel line per marking, found by *peeling*.
 
-    Segments are clustered by angle and by signed distance from the image centre
-    (tight tolerances: in a wide shot the far-end markings are only a few pixels
-    apart). Each cluster is refitted by PCA to the mask pixels within ``band_px``
-    of it with two outlier-rejection passes, and its extent is trimmed to the part
-    of the line that white pixels actually cover. A line whose extent is covered
-    for less than ``min_coverage`` of its length is a chord through other
-    markings, not a marking, and is dropped. Curved markings break into short
-    segments at varying angles and fall below ``min_length_px``.
+    Probabilistic-Hough segments, longest first, are only seeds. Each seed is
+    refitted to the mask pixels around it (PCA over a symmetric band, four
+    passes), then those pixels are removed from the live mask, so the other
+    segments Hough returns for the same thick marking find nothing left and no
+    duplicate lines appear. Deciding on pixels instead of on clustering the noisy
+    segments is what keeps nearby parallel markings (the far end of a wide shot)
+    apart while a marking interrupted by a player still comes out as one line.
+
+    The band must be symmetric and wider than the stroke: a narrow band truncates
+    the stroke, which leaves the fitted angle free to wander inside the stroke
+    (0.3 degrees over a 400 px goal line, measured). The stroke's half-width is
+    estimated from the pixel count per unit length after each pass and the band
+    follows it (``band_px`` is the minimum final half-width), so thin far-field
+    lines and the thick near touchline are both fitted over their whole stroke.
+
+    A fitted line's extent is trimmed to where white pixels actually are, and a
+    line covered for less than ``min_coverage`` of that extent is a chord through
+    other markings and is dropped, as are lines shorter than ``min_length_px``.
+    Curved markings break into short chords and mostly fall below that length.
+    ``weights`` (see :func:`line_weights`) are soft per-pixel whiteness values: the fit then
+    uses the fringe pixels around the binary mask with their partial weights, which gives
+    the stroke centre to a fraction of a pixel; without them every mask pixel counts 1.
+    ``merge_angle_deg`` / ``merge_dist_px`` define a final duplicate test: two
+    lines that overlap along their length, are within ``merge_angle_deg`` and whose
+    endpoints are within ``merge_dist_px`` of each other's line are one marking.
     """
     import cv2
 
     h, w = mask.shape[:2]
-    cx, cy = w / 2.0, h / 2.0
     segs = cv2.HoughLinesP(mask, rho=1.0, theta=np.pi / 360.0, threshold=int(hough_threshold),
                            minLineLength=int(max(8, min_length_px * 0.4)), maxLineGap=int(max_gap_px))
     if segs is None:
         return []
     segs = segs.reshape(-1, 4).astype(float)
-    d = segs[:, 2:] - segs[:, :2]
-    length = np.linalg.norm(d, axis=1)
-    keep = length > 2
-    segs, d, length = segs[keep], d[keep], length[keep]
-    if len(segs) == 0:
+    length = np.hypot(segs[:, 2] - segs[:, 0], segs[:, 3] - segs[:, 1])
+    segs = segs[np.argsort(-length)][:max_candidates]
+    if weights is None:
+        ys, xs = np.nonzero(mask)
+        wgt = np.ones(len(ys), dtype=np.float32)
+    else:
+        ys, xs = np.nonzero(weights > 0.04)
+        wgt = weights[ys, xs].astype(np.float32)
+    if len(ys) == 0:
         return []
-    theta = np.arctan2(d[:, 1], d[:, 0]) % np.pi
-    order = np.argsort(-length)
-    tol_th = math.radians(merge_angle_deg)
-    # Greedy clustering, longest first. A segment joins a cluster when its direction
-    # is within ``merge_angle_deg`` of the cluster line and both its endpoints lie
-    # within ``merge_dist_px`` of that line (an endpoint test, not a rho test: a
-    # small angle error moves rho by several pixels over a long line). The cluster
-    # line is refitted from all member endpoints after every merge.
-    clusters: List[List[int]] = []
-    c_abc: List[np.ndarray] = []
-    c_dir: List[np.ndarray] = []
-    c_theta: List[float] = []
-    c_iv: List[List[Tuple[float, float]]] = []  # covered intervals along the cluster line
-
-    def overlap(iv_list, lo, hi) -> float:
-        return sum(max(0.0, min(hi, b) - max(lo, a)) for a, b in iv_list)
-
-    for i in order:
-        e_i = np.array([segs[i, :2], segs[i, 2:]])
-        placed = False
-        for k in range(len(clusters)):
-            dth = abs(theta[i] - c_theta[k])
-            dth = min(dth, math.pi - dth)
-            if dth >= tol_th:
-                continue
-            if np.abs(e_i @ c_abc[k][:2] + c_abc[k][2]).max() >= merge_dist_px:
-                continue
-            t = e_i @ c_dir[k]
-            lo, hi = float(t.min()), float(t.max())
-            # pieces of one marking lie end to end; a parallel neighbour lies alongside
-            if overlap(c_iv[k], lo, hi) > max(4.0, 0.25 * (hi - lo)):
-                continue
-            clusters[k].append(int(i))
-            c_iv[k].append((lo, hi))
-            ends_k = np.concatenate([segs[clusters[k], :2], segs[clusters[k], 2:]], axis=0)
-            abc_k, d_k = _fit_line_pca(ends_k)
-            c_abc[k], c_dir[k] = abc_k, d_k
-            c_theta[k] = float(math.atan2(d_k[1], d_k[0]) % math.pi)
-            c_iv[k] = [(float(a), float(b)) for a, b in
-                       ((min(p @ d_k for p in np.array([segs[j, :2], segs[j, 2:]])),
-                         max(p @ d_k for p in np.array([segs[j, :2], segs[j, 2:]]))) for j in clusters[k])]
-            placed = True
-            break
-        if not placed:
-            clusters.append([int(i)])
-            abc_i, d_i = _fit_line_pca(e_i)
-            c_abc.append(abc_i)
-            c_dir.append(d_i)
-            c_theta.append(float(theta[i]))
-            t = e_i @ d_i
-            c_iv.append([(float(t.min()), float(t.max()))])
-
-    ys, xs = np.nonzero(mask)
     pix = np.stack([xs, ys], axis=1).astype(float)
+    alive = np.ones(len(pix), dtype=bool)
+    rem = np.pad(mask, 2)  # live mask with a margin so 3x3 probes never leave the array
     thick = cv2.dilate(mask, np.ones((3, 3), np.uint8))
+    grow = float(max_gap_px) * bridge
     out: List[ImageLine] = []
-    for members in clusters:
-        m = segs[members]
-        ends = np.concatenate([m[:, :2], m[:, 2:]], axis=0)
-        abc, dvec = _fit_line_pca(ends)
-        c0 = ends.mean(axis=0)
-        t_end = (ends - c0) @ dvec
-        lo, hi = t_end.min() - band_px, t_end.max() + band_px
-        pts = None
-        for cutoff in (band_px, 1.2):
-            dist = np.abs(pix @ abc[:2] + abc[2])
-            t = (pix - c0) @ dvec
-            sel = (dist <= cutoff) & (t >= lo) & (t <= hi)
-            if sel.sum() < 6:
-                pts = None
+    for seg in segs:
+        a, b = seg[:2], seg[2:]
+        d = b - a
+        seg_len = float(np.hypot(d[0], d[1]))
+        if seg_len < 4.0:
+            continue
+        # Quick duplicate test: a seed whose points are mostly on pixels that were
+        # already taken by an earlier line is another view of that marking.
+        probes = a + np.outer(np.linspace(0.15, 0.85, 5), d)
+        px = np.round(probes).astype(int) + 2
+        if sum(bool(rem[y - 1:y + 2, x - 1:x + 2].any()) for x, y in px) < 3:
+            continue
+        u = d / seg_len
+        c = (a + b) / 2.0
+        lo, hi = -seg_len / 2.0, seg_len / 2.0
+        band = band_px + 1.5
+        idx = None
+        half_w = 0.0
+        n_inl = 0
+        for margin in (1.5, 1.0, 0.5, 0.0):
+            sel = _band_select(pix, ys, alive, c, u, lo - grow, hi + grow, band)
+            if len(sel) < 6:
+                idx = None
                 break
             pts = pix[sel]
-            abc, dvec = _fit_line_pca(pts)
-        if pts is None:
+            # keep the run with most pixels: bridge player-sized gaps, not whole other markings
+            tt = (pts - c) @ u
+            order = np.argsort(tt)
+            gaps = np.nonzero(np.diff(tt[order]) > grow)[0]
+            if len(gaps):
+                starts, ends = np.r_[0, gaps + 1], np.r_[gaps + 1, len(tt)]
+                k = int(np.argmax(ends - starts))
+                sel = sel[order[starts[k]:ends[k]]]
+                pts = pix[sel]
+            fit = _fit_profile(pts, wgt[sel], c, u)
+            if fit is None:  # too short for a profile: plain total least squares
+                _abc, dv = _fit_line_pca(pts)
+                if dv @ u < 0:
+                    dv = -dv
+                cc = pts.mean(axis=0)
+                tt = (pts - cc) @ dv
+                fit = (cc, dv, float(tt.min()), float(tt.max()), float("nan"), len(pts))
+            c, u, lo, hi, thickness, n_inl = fit
+            if np.isfinite(thickness):
+                half_w = 0.5 * thickness
+            band = max(band_px, half_w + 1.5 + margin)
+            idx = sel
+        if idx is None:
             continue
-        c = pts.mean(axis=0)
-        tt = (pts - c) @ dvec
-        t_lo, t_hi = tt.min(), tt.max()
-        # coverage: walk the line in 1 px steps and look for white within +-1 px
-        n = int(max(2, math.ceil(t_hi - t_lo)))
-        samp = c + np.outer(np.linspace(t_lo, t_hi, n), dvec)
+        nrm = np.array([-u[1], u[0]])
+        abc = np.array([nrm[0], nrm[1], -(nrm @ c)])
+        n = int(max(2, math.ceil(hi - lo)))
+        samp = c + np.outer(np.linspace(lo, hi, n), u)
         sx = np.clip(np.round(samp[:, 0]).astype(int), 0, w - 1)
         sy = np.clip(np.round(samp[:, 1]).astype(int), 0, h - 1)
         hit = thick[sy, sx] > 0
         if hit.sum() < 2:
             continue
-        idx = np.nonzero(hit)[0]
-        first, last = idx[0], idx[-1]
+        hidx = np.nonzero(hit)[0]
+        first, last = hidx[0], hidx[-1]
         coverage = float(hit[first:last + 1].mean())
         p0, p1 = samp[first], samp[last]
         if np.linalg.norm(p1 - p0) < min_length_px or coverage < min_coverage:
             continue
-        out.append(ImageLine(p0=p0, p1=p1, abc=abc, n_pixels=int(len(pts))))
+        out.append(ImageLine(p0=p0, p1=p1, abc=abc, n_pixels=int(n_inl)))
+        # take this marking's pixels (stroke plus a halo) out of the live mask
+        take = _band_select(pix, ys, alive, c, u, lo - 2.0, hi + 2.0, max(band_px, half_w + 1.0))
+        alive[take] = False
+        rem[ys[take] + 2, xs[take] + 2] = 0
     out.sort(key=lambda ln: -ln.length)
+    tol_th = math.radians(merge_angle_deg)
     kept: List[ImageLine] = []
     for ln in out:
         dup = False
         for k in kept:
             dth = abs(ln.angle - k.angle)
             dth = min(dth, math.pi - dth)
-            if dth < tol_th and np.abs(ln.endpoints() @ k.abc[:2] + k.abc[2]).max() < merge_dist_px:
+            if dth >= tol_th or np.abs(ln.endpoints() @ k.abc[:2] + k.abc[2]).max() >= merge_dist_px:
+                continue
+            dk = (k.p1 - k.p0) / max(k.length, 1e-9)
+            t_ln = np.sort((ln.endpoints() - k.p0) @ dk)
+            if min(t_ln[1], k.length) - max(t_ln[0], 0.0) > 0.0:  # they share part of their extent
                 dup = True
                 break
         if not dup:
@@ -427,8 +578,23 @@ def _score_hypotheses(h_m2px: np.ndarray, lines: Sequence[ImageLine], model_abc:
     N = len(lines)
     ends = np.stack([ln.endpoints() for ln in lines], axis=0)  # (N, 2, 2)
     lengths = np.array([ln.length for ln in lines])
-    with np.errstate(divide="ignore", invalid="ignore"):
-        h_px2m = np.linalg.inv(h_m2px)
+    h_m2px = np.asarray(h_m2px, float)
+    finite = np.isfinite(h_m2px).all(axis=(1, 2))
+    h_m2px = np.where(finite[:, None, None], h_m2px, np.eye(3)[None])
+    det = np.linalg.det(h_m2px)
+    regular = finite & (np.abs(det) > 1e-30 * np.maximum(np.abs(h_m2px).max(axis=(1, 2)) ** 3, 1e-300))
+    h_m2px = np.where(regular[:, None, None], h_m2px, np.eye(3)[None])
+    h_px2m = np.linalg.inv(h_m2px)
+    # A homography is defined up to scale *and sign*, but the checks below look at the
+    # sign of the homogeneous coordinate. Fix the sign so that the image centre, which is
+    # always in front of the camera, has w > 0 under the pixel -> metre map (hence also
+    # the metre -> pixel map is positive at its pre-image). Every check is then
+    # independent of how the caller normalised H (h33 = 1, unit norm, an inverse, ...).
+    centre = np.array([image_centre[0], image_centre[1], 1.0])
+    w_c = h_px2m @ centre  # (B, 3)
+    flip = np.where(w_c[:, 2] < 0.0, -1.0, 1.0)
+    h_px2m = h_px2m * flip[:, None, None]
+    h_m2px = h_m2px * flip[:, None, None]
     # Camera-side prior: the markings are symmetric under a 180-degree turn of the
     # pitch, so lines alone cannot tell the near touchline from the far one. The
     # GSR frame puts the camera on the +y side, so (0, +W/2) must project lower in
@@ -442,10 +608,8 @@ def _score_hypotheses(h_m2px: np.ndarray, lines: Sequence[ImageLine], model_abc:
     # the camera) have the same orientation, so the Jacobian of the pixel -> metre
     # map must have positive determinant at the image centre, which is always in
     # front of the camera. For a homography det J(p) = det(H) / w(p)^3.
-    centre = np.array([image_centre[0], image_centre[1], 1.0])
-    w_c = h_px2m @ centre  # (B, 3)
     with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
-        jac_sign = np.linalg.det(h_px2m) / (w_c[:, 2] ** 3)
+        jac_sign = np.linalg.det(h_px2m) / (w_c[:, 2] * flip) ** 3
     orient_ok &= np.isfinite(jac_sign) & (jac_sign > 0)
     # projected model lines in the image: (B, M, 3)
     l_px = _normalise_lines(np.einsum("mk,bkj->bmj", model_abc, h_px2m))
@@ -467,7 +631,7 @@ def _score_hypotheses(h_m2px: np.ndarray, lines: Sequence[ImageLine], model_abc:
     same_sign = (np.sign(w[..., 0]) == np.sign(w[..., 1])) & np.isfinite(xy).all(axis=(-1, -2))
     inlier = (best_d <= tau_px) & (frac >= min_extent) & same_sign
     score = (inlier * lengths[None, :] * frac).sum(axis=1)
-    score = np.where(np.isfinite(h_m2px).all(axis=(1, 2)) & orient_ok, score, -1.0)
+    score = np.where(regular & orient_ok, score, -1.0)
     return score, best, inlier
 
 
@@ -656,18 +820,30 @@ def _families_ok(matches: Sequence[LineMatch], model: PitchModel, min_inliers: i
     return len(matches) >= min_inliers and nx >= 2 and ny >= 2
 
 
+def default_tau_px(width: int, tau_px: Optional[float] = None) -> float:
+    """Inlier distance for the global search and the final match (pixels)."""
+    return tau_px if tau_px is not None else max(2.5, 0.006 * width)
+
+
 def calibrate_frame(frame_bgr: np.ndarray, model: PitchModel = DEFAULT_PITCH, prior_m2px: Optional[np.ndarray] = None,
                     min_inliers: int = 4, tau_px: Optional[float] = None, track_tau_px: Optional[float] = None,
-                    mask_kw: Optional[dict] = None, line_kw: Optional[dict] = None) -> CalibrationResult:
+                    mask_kw: Optional[dict] = None, line_kw: Optional[dict] = None,
+                    extra_priors: Sequence[np.ndarray] = (), min_tracked_inliers: int = 0) -> CalibrationResult:
     """Calibrate one frame from scratch, or from ``prior_m2px`` (tracking) with a
-    global search as the fallback."""
+    global search as the fallback. ``extra_priors`` are tried after ``prior_m2px``
+    (for instance the previous solution when the first prior is an extrapolation)
+    and before the global search. A tracked solution with fewer than
+    ``min_tracked_inliers`` matched lines is rejected as a false lock (when the camera
+    moves further than the tracking tolerance between frames the lines can snap onto
+    their neighbours and still fit: 6 m of error with a plausible residual, measured) and
+    the global search decides. The result carries the extracted ``lines``."""
     h, w = frame_bgr.shape[:2]
-    tau = tau_px if tau_px is not None else max(2.5, 0.006 * w)
+    tau = default_tau_px(w, tau_px)
     tau_track = track_tau_px if track_tau_px is not None else 4.0 * tau
     mask = white_line_mask(frame_bgr, **(mask_kw or {}))
-    lines = extract_lines(mask, **(line_kw or {}))
+    lines = extract_lines(mask, **{"weights": line_weights(frame_bgr, mask), **(line_kw or {})})
     if len(lines) < 4:
-        return CalibrationResult(status=STATUS_UNCALIBRATED, n_lines=len(lines),
+        return CalibrationResult(status=STATUS_UNCALIBRATED, n_lines=len(lines), lines=lines,
                                  note=f"{len(lines)} straight markings found, need 4")
 
     def finish(h0: np.ndarray, status: str, note: str) -> Optional[CalibrationResult]:
@@ -681,21 +857,22 @@ def calibrate_frame(frame_bgr: np.ndarray, model: PitchModel = DEFAULT_PITCH, pr
         if not _families_ok(matches, model, min_inliers):
             return None
         fit_px, rep_m = _errors(hh, lines, matches, model)
-        return CalibrationResult(status=status, h_m2px=hh, h_px2m=np.linalg.inv(hh) / np.linalg.inv(hh)[2, 2],
+        h_inv = np.linalg.inv(hh)
+        return CalibrationResult(status=status, h_m2px=hh, h_px2m=h_inv / h_inv[2, 2],
                                  matches=matches, n_lines=len(lines), fit_error_px=fit_px,
-                                 reprojection_error_m=rep_m, note=note)
+                                 reprojection_error_m=rep_m, note=note, lines=lines)
 
-    if prior_m2px is not None:
-        res = finish(prior_m2px, STATUS_TRACKED, "tracked from the previous frame")
-        if res is not None:
+    for prior in ([prior_m2px] if prior_m2px is not None else []) + list(extra_priors):
+        res = finish(prior, STATUS_TRACKED, "tracked from the previous frame")
+        if res is not None and res.n_inliers >= min_tracked_inliers:
             return res
     h_best, matches, score = search_homography(lines, w, h, model, tau_px=tau)
     if h_best is None or not _families_ok(matches, model, min_inliers):
-        return CalibrationResult(status=STATUS_UNCALIBRATED, n_lines=len(lines),
+        return CalibrationResult(status=STATUS_UNCALIBRATED, n_lines=len(lines), lines=lines,
                                  note=f"global search: {len(matches)} consistent lines, need {min_inliers} across both families")
     res = finish(h_best, STATUS_CALIBRATED, f"global search over {len(lines)} lines")
     if res is None:
-        return CalibrationResult(status=STATUS_UNCALIBRATED, n_lines=len(lines),
+        return CalibrationResult(status=STATUS_UNCALIBRATED, n_lines=len(lines), lines=lines,
                                  note="global search found a hypothesis that did not survive refinement")
     return res
 
@@ -715,60 +892,202 @@ def frame_difference(prev_small: Optional[np.ndarray], frame_bgr: np.ndarray, si
     return float(np.abs(small - prev_small).mean()), small
 
 
+# Shot-cut detection. A grey frame difference alone misses a cut between two shots
+# whose brightness happens to be alike (wide camera on one grass colour to a medium
+# camera on another measured 27 on a 0-255 scale at 1280x720, and a fast pan of 6 m per
+# frame measures 5.8), so it is paired with a hue-saturation histogram distance, which
+# sees the colour change but not the camera moving. Measured on the synthetic clips:
+#   within a shot  grey 2.0 (0.8 m/frame pan) .. 5.8 (6 m/frame),  HS distance 0.02 .. 0.05
+#   stress pairs   grey up to 21 (+20 % exposure), HS distance up to 0.17 (mowing stripes)
+#   cuts           grey 9 .. 27,                                    HS distance 0.33 .. 0.89
+# The thresholds below sit between those groups. Real footage is unmeasured.
+CUT_GREY_THRESHOLD = 25.0
+CUT_HIST_THRESHOLD = 0.2
+_SIG_SIZE = (160, 90)  # downscale for both features (width, height)
+_HS_BINS = (30, 32)
+_HS_BLUR_BINS = 1.0  # smooths the histogram so a small hue drift cannot flip a bin and read as a cut
+
+
+@dataclass
+class ShotSignature:
+    """What the cut detector keeps from a frame: a 64x36 grey thumbnail and a smoothed HS histogram."""
+
+    grey: np.ndarray
+    hs: np.ndarray
+
+
+def shot_signature(frame_bgr: np.ndarray) -> ShotSignature:
+    import cv2
+
+    small = cv2.resize(frame_bgr, _SIG_SIZE, interpolation=cv2.INTER_AREA)
+    grey = cv2.resize(cv2.cvtColor(small, cv2.COLOR_BGR2GRAY), (64, 36), interpolation=cv2.INTER_AREA)
+    hist = cv2.calcHist([cv2.cvtColor(small, cv2.COLOR_BGR2HSV)], [0, 1], None, list(_HS_BINS), [0, 180, 0, 256])
+    hist = cv2.GaussianBlur(hist.astype(np.float32), (0, 0), _HS_BLUR_BINS, borderType=cv2.BORDER_REFLECT)
+    return ShotSignature(grey=grey.astype(np.float32), hs=hist / max(float(hist.sum()), 1e-9))
+
+
+def shot_change(prev: ShotSignature, cur: ShotSignature) -> Tuple[float, float]:
+    """(mean absolute grey difference 0-255, Bhattacharyya distance of the HS histograms 0-1)."""
+    grey = float(np.abs(prev.grey - cur.grey).mean())
+    bc = float(np.sqrt(prev.hs * cur.hs).sum())
+    return grey, math.sqrt(max(0.0, 1.0 - bc))
+
+
+# Homography filtering. The 8 free entries of the normalised pixel-to-pitch map are
+# filtered independently with an alpha-beta (constant-velocity) filter. A linear blend of
+# consecutive homographies lags a panning camera by (1 - alpha) / alpha frames of motion
+# (measured: up to 1.8 m on the 1.5 m/frame pan clip at alpha 0.6, against 0.1 m for the
+# per-frame fit itself), whereas a constant-velocity filter has no lag on a steady pan and
+# still averages the fit noise on a static shot.
+
+
+def _h_to_params(h_m2px: np.ndarray, width: int, height: int, model: PitchModel) -> np.ndarray:
+    hn = np.diag([1.0 / width, 1.0 / height, 1.0]) @ np.asarray(h_m2px, float) @ np.diag([model.half_length, model.half_width, 1.0])
+    return (hn / hn[2, 2]).reshape(-1)[:8]
+
+
+def _params_to_h(p: np.ndarray, width: int, height: int, model: PitchModel) -> np.ndarray:
+    hn = np.append(np.asarray(p, float), 1.0).reshape(3, 3)
+    h = np.diag([float(width), float(height), 1.0]) @ hn @ np.diag([1.0 / model.half_length, 1.0 / model.half_width, 1.0])
+    return h / h[2, 2]
+
+
+def homography_shift_px(h_a_m2px: np.ndarray, h_b_m2px: np.ndarray, width: int, height: int) -> float:
+    """How far apart two metre -> pixel maps put the same pitch points, in pixels: the largest
+    distance over four anchor pixels in the lower half of the image (where the pitch is) of
+    the point ``h_a`` sees there against where ``h_b`` puts the same pitch point."""
+    anchors = np.array([[0.25 * width, 0.6 * height], [0.75 * width, 0.6 * height],
+                        [0.2 * width, 0.9 * height], [0.8 * width, 0.9 * height]])
+    try:
+        pitch = apply_homography(np.linalg.inv(h_a_m2px), anchors)
+        d = np.linalg.norm(apply_homography(h_b_m2px, pitch) - anchors, axis=1).max()
+    except np.linalg.LinAlgError:
+        return float("inf")
+    return float(d) if np.isfinite(d) else float("inf")
+
+
 class FrameCalibrator:
-    """Stateful per-frame calibration with tracking, smoothing and shot-cut resets.
+    """Stateful per-frame calibration with tracking, filtering and shot-cut resets.
 
     ``update(frame)`` returns a :class:`CalibrationResult` whose ``project`` maps
     pixels to metres (NaN when uncalibrated). ``name`` lets the pipeline report it
     as its projector backend.
+
+    Per frame: the shot-cut test (grey difference ``>= cut_threshold`` or HS histogram
+    distance ``>= hist_threshold``; ``cut_threshold >= 255`` switches the test off) clears
+    the state; the frame is tracked from the filter's one-step prediction (falling back to
+    the previous solution, then to the global search); a tracked fit is passed through the
+    alpha-beta filter (``smoothing`` is alpha, 0 or 1 turns the filter off) unless it
+    disagrees with the prediction by more than ``guard_px`` at the anchor pixels, which
+    means the camera did something other than continue its motion and the new fit is
+    trusted as it is.
     """
 
     name = "line-calibration"
 
-    def __init__(self, model: PitchModel = DEFAULT_PITCH, cut_threshold: float = 30.0, smoothing: float = 0.6,
-                 hold_frames: int = 5, min_inliers: int = 4, **calibrate_kw):
+    def __init__(self, model: PitchModel = DEFAULT_PITCH, cut_threshold: float = CUT_GREY_THRESHOLD, smoothing: float = 0.6,
+                 hold_frames: int = 5, min_inliers: int = 4, hist_threshold: float = CUT_HIST_THRESHOLD,
+                 guard_px: Optional[float] = None, track_keep: float = 0.6, **calibrate_kw):
         self.model = model
         self.cut_threshold = cut_threshold
+        self.hist_threshold = hist_threshold
         self.smoothing = smoothing
         self.hold_frames = hold_frames
         self.min_inliers = min_inliers
+        self.guard_px = guard_px
+        self.track_keep = track_keep
         self.calibrate_kw = calibrate_kw
         self.reset()
 
     def reset(self) -> None:
-        self._prior: Optional[np.ndarray] = None
-        self._prev_small: Optional[np.ndarray] = None
+        self._prior: Optional[np.ndarray] = None  # last output homography (metres -> pixels)
+        self._p: Optional[np.ndarray] = None  # its filtered parameters
+        self._v: Optional[np.ndarray] = None  # per-frame velocity of the parameters
+        self._prev_sig: Optional[ShotSignature] = None
+        self._size: Optional[Tuple[int, int]] = None  # (width, height) of the frames so far
+        self._n_inliers = 0  # inliers of the last solved frame
         self._missed = 0
         self.history: List[str] = []
+        self.last_shot_change: Tuple[float, float] = (0.0, 0.0)
+        self.last_shift_px: float = float("nan")
+
+    def _drop_track(self) -> None:
+        self._prior = None
+        self._p = None
+        self._v = None
+        self._n_inliers = 0
+
+    def _priors(self, width: int, height: int) -> Tuple[Optional[np.ndarray], List[np.ndarray]]:
+        if self._p is None:
+            return None, []
+        h_prev = _params_to_h(self._p, width, height, self.model)
+        if self._v is None:
+            return h_prev, []
+        return _params_to_h(self._p + self._v, width, height, self.model), [h_prev]
+
+    def _filter(self, res: CalibrationResult, width: int, height: int) -> None:
+        """Replace the fit in ``res`` by the filtered homography and update the filter state."""
+        p_raw = _h_to_params(res.h_m2px, width, height, self.model)
+        alpha = self.smoothing
+        have_prev = self._p is not None
+        active = 0.0 < alpha < 1.0 and res.status == STATUS_TRACKED and have_prev
+        p_new, v_new = p_raw, None
+        if have_prev and not active:  # a fresh global search right after a solved frame: learn the motion from the pair
+            v_new = p_raw - self._p
+        if active and self._v is not None:
+            p_pred = self._p + self._v
+            self.last_shift_px = homography_shift_px(_params_to_h(p_pred, width, height, self.model), res.h_m2px, width, height)
+            guard = self.guard_px if self.guard_px is not None else 0.0008 * width
+            if self.last_shift_px <= guard:
+                beta = alpha * alpha / (2.0 - alpha)  # critically damped (Benedict-Bordner)
+                innov = p_raw - p_pred
+                p_new, v_new = p_pred + alpha * innov, self._v + beta * innov
+            else:
+                v_new = p_raw - self._p
+        elif active:  # first tracked frame after a (re)start: no velocity yet, take the fit and start one
+            v_new = p_raw - self._p
+        if p_new is not p_raw:
+            h_f = _params_to_h(p_new, width, height, self.model)
+            matches = match_lines(h_f, res.lines, self.model, tau_px=default_tau_px(width, self.calibrate_kw.get("tau_px")))
+            if _families_ok(matches, self.model, self.min_inliers):
+                res.h_m2px = h_f
+                h_inv = np.linalg.inv(h_f)
+                res.h_px2m = h_inv / h_inv[2, 2]
+                res.matches = matches
+                res.fit_error_px, res.reprojection_error_m = _errors(h_f, res.lines, matches, self.model)
+            else:  # the filtered solution no longer explains the markings: fall back to the fit
+                p_new = p_raw
+        self._p, self._v = p_new, v_new
+        self._prior = res.h_m2px
 
     def update(self, frame_bgr: np.ndarray) -> CalibrationResult:
-        diff, small = frame_difference(self._prev_small, frame_bgr)
-        cut = self._prev_small is not None and diff >= self.cut_threshold
-        self._prev_small = small
+        h, w = frame_bgr.shape[:2]
+        if self._size is not None and self._size != (w, h):  # a different video: nothing carries over
+            self.reset()
+        self._size = (w, h)
+        sig = shot_signature(frame_bgr)
+        cut = False
+        if self._prev_sig is not None and self.cut_threshold < 255:
+            self.last_shot_change = shot_change(self._prev_sig, sig)
+            cut = self.last_shot_change[0] >= self.cut_threshold or self.last_shot_change[1] >= self.hist_threshold
+        self._prev_sig = sig
         if cut:
-            self._prior = None
+            self._drop_track()
             self._missed = 0
-        res = calibrate_frame(frame_bgr, self.model, prior_m2px=self._prior, min_inliers=self.min_inliers,
-                              **self.calibrate_kw)
+        prior, extra = self._priors(w, h)
+        floor = max(self.min_inliers, int(math.ceil(self.track_keep * self._n_inliers))) if prior is not None else 0
+        res = calibrate_frame(frame_bgr, self.model, prior_m2px=prior, extra_priors=extra, min_inliers=self.min_inliers,
+                              min_tracked_inliers=floor, **self.calibrate_kw)
         res.shot_cut = bool(cut)
         if res.ok:
-            h_new = res.h_m2px
-            if self._prior is not None and res.status == STATUS_TRACKED and 0.0 < self.smoothing < 1.0:
-                h_s = self.smoothing * h_new + (1.0 - self.smoothing) * self._prior
-                h_s = h_s / h_s[2, 2]
-                # keep the smoothed solution only if it still explains the lines
-                res.h_m2px = h_s
-                res.h_px2m = np.linalg.inv(h_s) / np.linalg.inv(h_s)[2, 2]
-                mask = white_line_mask(frame_bgr)
-                lines = extract_lines(mask)
-                res.matches = match_lines(h_s, lines, self.model, tau_px=self.calibrate_kw.get("tau_px") or max(2.5, 0.006 * frame_bgr.shape[1]))
-                res.fit_error_px, res.reprojection_error_m = _errors(h_s, lines, res.matches, self.model)
-            self._prior = res.h_m2px
+            self._filter(res, w, h)
+            self._n_inliers = res.n_inliers
             self._missed = 0
         else:
             self._missed += 1
+            self._v = None  # a velocity from before a gap says nothing about after it
             if self._missed > self.hold_frames:
-                self._prior = None
+                self._drop_track()
         self.history.append(res.status)
         return res
 

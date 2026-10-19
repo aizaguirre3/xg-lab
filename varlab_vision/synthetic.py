@@ -165,11 +165,15 @@ def draw_markings(frame: np.ndarray, camera: BroadcastCamera, pitch: PitchModel 
         pts_m = np.concatenate(dense, axis=0)
         px, depth = camera.project(pts_m)
         ok = (depth > 1e-6) & np.isfinite(px).all(axis=1) & (np.abs(px[:, 0]) < 8 * w) & (np.abs(px[:, 1]) < 8 * h)
+        # Sub-pixel vertices (4 fractional bits): rounding them to whole pixels shifts a
+        # near-horizontal far touchline by a constant fraction of a pixel along its whole
+        # length (up to 0.5 px), a bias a camera does not have and that the calibration
+        # cannot average out.
+        fp = np.round(px * 16.0).astype(np.int64)
         for i in range(len(px) - 1):
             if ok[i] and ok[i + 1]:
-                a = (int(round(px[i, 0])), int(round(px[i, 1])))
-                b = (int(round(px[i + 1, 0])), int(round(px[i + 1, 1])))
-                cv2.line(frame, a, b, colour, thickness=thickness, lineType=cv2.LINE_AA)
+                cv2.line(frame, (int(fp[i, 0]), int(fp[i, 1])), (int(fp[i + 1, 0]), int(fp[i + 1, 1])), colour,
+                         thickness=thickness, lineType=cv2.LINE_AA, shift=4)
 
 
 @dataclass

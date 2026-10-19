@@ -99,6 +99,44 @@ def test_extract_lines_finds_the_markings(wide_clip):
     assert max(m.distance_px for m in truth) < 4.0
 
 
+def test_scoring_ignores_the_scale_and_sign_of_the_homography(wide_clip):
+    """A homography is defined up to scale and sign; the orientation checks must not care.
+    (``np.linalg.inv`` of a ``h33 = 1`` matrix has an arbitrary sign of ``h33``.)"""
+    lines = cal.extract_lines(cal.white_line_mask(_frame(wide_clip, 1)))
+    h = np.linalg.inv(wide_clip.homography)
+    counts = {k: len(cal.match_lines(k * h, lines, DEFAULT_PITCH, tau_px=4.0)) for k in (1.0, -1.0, 3.7, -0.02)}
+    assert counts[1.0] >= 8
+    assert len(set(counts.values())) == 1, counts
+    # a mirrored pitch (x flipped) must still be rejected, whatever the normalisation
+    mirror = h @ np.diag([-1.0, 1.0, 1.0])
+    assert len(cal.match_lines(mirror, lines, DEFAULT_PITCH, tau_px=4.0)) == 0
+    assert len(cal.match_lines(-mirror, lines, DEFAULT_PITCH, tau_px=4.0)) == 0
+
+
+def test_one_line_per_marking(wide_clip):
+    """Peeling: a thick marking must not come back as several near-identical lines. Two
+    lines may lie on the same marking only when a player hides the stretch between them."""
+    lines = cal.extract_lines(cal.white_line_mask(_frame(wide_clip, 1)))
+    h_px2m = wide_clip.homography
+    truth = cal.match_lines(np.linalg.inv(h_px2m), lines, DEFAULT_PITCH, tau_px=1.5)
+    by_name = {}
+    for m in truth:
+        by_name.setdefault(m.model_name, []).append(m.image_index)
+    assert {"touchline_near", "touchline_far", "halfway", "goal_line_left", "goal_line_right"} <= set(by_name)
+    for name, idx in by_name.items():
+        kind = DEFAULT_PITCH.line(name).kind
+        spans = []
+        for i in idx:
+            xy = cal.apply_homography(h_px2m, lines[i].endpoints())
+            t = xy[:, 1] if kind == X_CONST else xy[:, 0]
+            spans.append((float(t.min()), float(t.max())))
+        spans.sort()
+        for (a0, a1), (b0, b1) in zip(spans[:-1], spans[1:]):
+            assert b0 >= a1 - 0.5, (name, spans)  # no two lines cover the same stretch (0.5 m of slack)
+    # and the sub-pixel fits sit on the truth
+    assert max(m.distance_px for m in truth) < 1.5
+
+
 # ----------------------------------------------------------------------------
 # Global search: recover the known homography
 # ----------------------------------------------------------------------------
@@ -129,11 +167,13 @@ def test_global_search_recovers_the_homography(which, wide_clip, medium_clip):
     assert len({m.model_name for m in res.matches if kinds[m.model_name] == Y_CONST}) >= 2
     assert res.fit_error_px < 2.5
     kp_err, foot_err = _accuracy(clip, res, 1)
-    # Achieved on 2026-10-19 at 1280x720: keypoints median 0.06-0.07 m, max 0.14 m;
-    # actor feet max 0.10 m. The 0.5 m bound is the test's tolerance, not the result.
-    assert np.median(kp_err) < 0.25
-    assert kp_err.max() < 0.5
-    assert foot_err.max() < 0.5
+    # Achieved on 2026-10-19 at 1280x720 (this fixture): keypoints median 0.013 m (wide) /
+    # 0.006 m (medium), max 0.028 / 0.011 m; actor feet max 0.019 / 0.004 m. Over six seeds the
+    # worst keypoint max is 0.040 m (wide) and 0.011 m (medium). The bounds below are a few
+    # times that, not the result; the loose original ones were 0.25 m median and 0.5 m max.
+    assert np.median(kp_err) < 0.05
+    assert kp_err.max() < 0.15
+    assert foot_err.max() < 0.15
     # projecting the four pitch corners back and forth is the identity
     corners = np.array([[-52.5, -34], [52.5, -34], [52.5, 34], [-52.5, 34]], float)
     px = cal.apply_homography(res.h_m2px, corners)
@@ -149,6 +189,18 @@ def test_result_projection_api(wide_clip):
     d = res.as_dict()
     assert d["status"] == "calibrated" and d["n_inliers"] == res.n_inliers
     assert isinstance(d["homography_px2m"], list) and len(d["homography_px2m"]) == 3
+
+
+@pytest.mark.parametrize("thickness", [8, 14])
+def test_thick_strokes_are_fitted_over_their_whole_width(tmp_path: Path, thickness):
+    """Near-camera markings on a 1080p broadcast frame are many pixels wide; a fit band
+    narrower than the stroke lets the angle wander inside it (0.3 degrees measured)."""
+    clip = render_synthetic_clip(tmp_path, n_frames=1, width=W, height=H, seed=8, name="SYN-THICK",
+                                 camera=medium_camera(W, H), line_thickness=thickness)
+    res = cal.calibrate_frame(_frame(clip, 1))
+    assert res.status == cal.STATUS_CALIBRATED
+    kp_err, foot_err = _accuracy(clip, res, 1)
+    assert np.median(kp_err) < 0.25 and kp_err.max() < 0.5 and foot_err.max() < 0.5
 
 
 # ----------------------------------------------------------------------------
@@ -191,7 +243,37 @@ def test_tracking_follows_a_mild_pan(tmp_path: Path):
     assert not any(r.shot_cut for r in results)
     for i, r in enumerate(results, start=1):
         kp_err, foot_err = _accuracy(clip, r, i)
-        assert kp_err.max() < 0.6 and foot_err.max() < 0.6  # smoothing lags a moving camera slightly
+        assert kp_err.max() < 0.2 and foot_err.max() < 0.2  # measured worst: 0.060 m keypoints, 0.040 m feet
+
+
+@pytest.mark.parametrize("pan", [1.5, 3.0])
+def test_tracking_has_no_lag_on_a_steady_pan(tmp_path: Path, pan):
+    """The filter extrapolates a steady pan instead of lagging it: a linear blend of
+    consecutive homographies was 1.8 m behind a 1.5 m/frame pan. After the start-up
+    frames every frame must be tracked and within 0.3 m."""
+    clip = render_synthetic_clip(tmp_path, n_frames=12, width=W, height=H, seed=4, name=f"SYN-PAN{pan}",
+                                 camera=medium_camera(W, H, look_x=-20.0), pan_m_per_frame=pan)
+    fc = cal.FrameCalibrator()
+    results = [fc.update(_frame(clip, i)) for i in range(1, 13)]
+    assert all(r.status == cal.STATUS_TRACKED for r in results[3:])
+    assert not any(r.shot_cut for r in results)
+    for i, r in enumerate(results, start=1):
+        kp_err, foot_err = _accuracy(clip, r, i)
+        assert kp_err.max() < 0.3, (i, kp_err.max())
+        assert len(foot_err) == 0 or foot_err.max() < 0.3
+
+
+def test_tracking_does_not_lock_onto_the_wrong_lines_on_a_very_fast_pan(tmp_path: Path):
+    """Between frames the camera moves further than the tracking tolerance, so the lines
+    can snap onto their neighbours with a fine residual (6 m wrong, measured). Fewer
+    inliers than the last frame sends it to the global search instead."""
+    clip = render_synthetic_clip(tmp_path, n_frames=8, width=W, height=H, seed=4, name="SYN-FASTPAN",
+                                 camera=medium_camera(W, H, look_x=-20.0), pan_m_per_frame=6.0)
+    fc = cal.FrameCalibrator()
+    for i in range(1, 9):
+        r = fc.update(_frame(clip, i))
+        kp_err, _ = _accuracy(clip, r, i)
+        assert r.ok and kp_err.max() < 0.5, (i, r.status, kp_err.max())
 
 
 def test_shot_cut_resets_the_calibration(tmp_path: Path):
@@ -207,9 +289,42 @@ def test_shot_cut_resets_the_calibration(tmp_path: Path):
     assert results[3].status == cal.STATUS_TRACKED
     for i in (4, 5, 8):
         kp_err, _ = _accuracy(clip, results[i - 1], i)
-        assert kp_err.max() < 0.6
+        assert kp_err.max() < 0.2  # measured 0.045 / 0.018 / 0.017 m
     # the two cameras really are different, so blending would have failed the bound above
     assert not np.allclose(clip.homographies[3], clip.homographies[4], atol=1e-3)
+
+
+def test_cut_detector_has_margin_on_both_sides(tmp_path: Path):
+    """Largest within-shot value on a fast pan versus the cut, against the thresholds."""
+    pan = render_synthetic_clip(tmp_path, n_frames=8, width=W, height=H, seed=4, name="SYN-PAN-M",
+                                camera=medium_camera(W, H, look_x=-20.0), pan_m_per_frame=3.0)
+    cut = render_synthetic_clip(tmp_path, n_frames=8, width=W, height=H, seed=5, name="SYN-CUT-M",
+                                cut_at_frame=5, green_after_cut=(60, 110, 30))
+
+    def changes(clip):
+        sigs = [cal.shot_signature(_frame(clip, i)) for i in range(1, 9)]
+        return np.array([cal.shot_change(a, b) for a, b in zip(sigs[:-1], sigs[1:])])
+
+    within, across = changes(pan), changes(cut)
+    # within a shot both measures stay at least 3x below their thresholds
+    assert within[:, 0].max() < cal.CUT_GREY_THRESHOLD / 3
+    assert within[:, 1].max() < cal.CUT_HIST_THRESHOLD / 3
+    # at the cut the colour distance clears its threshold with room to spare, on its own
+    assert across[3, 1] > 1.5 * cal.CUT_HIST_THRESHOLD
+    assert (across[[0, 1, 2, 4, 5, 6]] < [cal.CUT_GREY_THRESHOLD / 3, cal.CUT_HIST_THRESHOLD / 3]).all()
+
+
+def test_a_new_frame_size_restarts_the_tracker(tmp_path: Path, wide_clip):
+    """The filter state is in units of the frame size; a different video must not inherit it."""
+    small = render_synthetic_clip(tmp_path, n_frames=2, width=640, height=360, seed=9, name="SYN-SMALL",
+                                  camera=medium_camera(640, 360))
+    fc = cal.FrameCalibrator()
+    fc.update(_frame(wide_clip, 1))
+    assert fc.update(_frame(wide_clip, 2)).status == cal.STATUS_TRACKED
+    res = fc.update(_frame(small, 1))
+    assert res.status == cal.STATUS_CALIBRATED and not res.shot_cut
+    kp_err, _ = _accuracy(small, res, 1)
+    assert kp_err.max() < 0.5
 
 
 def test_tracking_loss_falls_back_to_search_without_a_pixel_cut(tmp_path: Path):
@@ -223,4 +338,26 @@ def test_tracking_loss_falls_back_to_search_without_a_pixel_cut(tmp_path: Path):
     assert results[3].status == cal.STATUS_CALIBRATED
     assert not any(r.shot_cut for r in results)
     kp_err, _ = _accuracy(clip, results[3], 4)
-    assert kp_err.max() < 0.6
+    assert kp_err.max() < 0.2  # measured 0.011 m
+
+
+# ----------------------------------------------------------------------------
+# The Colab probe's clip
+# ----------------------------------------------------------------------------
+
+
+def test_probe_clip_has_every_actor_in_frame_and_none_overlapping(tmp_path: Path):
+    """``render_synthetic_clip(out, n_frames=30, width=1920, height=1080, n_per_team=5,
+    box_wh=(60, 140), seed=0)`` is what the Colab probe renders: 10 players and the referee,
+    all in frame in every frame and never overlapping (the smoke detector would merge them)."""
+    clip = render_synthetic_clip(tmp_path, n_frames=30, width=1920, height=1080, n_per_team=5,
+                                 box_wh=(60, 140), seed=0)
+    df = objects_frame(read_gsr_clip(clip.labels_path))
+    per_frame = df.groupby("frame").size()
+    assert (per_frame == 11).all() and len(per_frame) == 30
+    for _, g in df.groupby("frame"):
+        x0, y0 = g["x"].to_numpy(), g["y"].to_numpy()
+        x1, y1 = x0 + g["w"].to_numpy(), y0 + g["h"].to_numpy()
+        for a in range(len(g)):
+            for b in range(a + 1, len(g)):
+                assert x1[a] <= x0[b] or x1[b] <= x0[a] or y1[a] <= y0[b] or y1[b] <= y0[a]
