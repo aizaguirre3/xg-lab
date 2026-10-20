@@ -8,6 +8,13 @@ the layout of clips inside the Hugging Face dataset repository (``clip_pattern``
 is unverified until access arrives. When the data is already on the VM (uploaded
 or mounted) pass ``local_root`` to ``process_clip`` and no download happens.
 
+Camera calibration: ``production_pipeline`` builds a ``FrameCalibrator`` by default
+(classical line detection and a homography search on the CPU, about 0.2 s per
+1080p frame on a laptop), so every clip comes back with pitch coordinates, a
+``camera`` record per frame and a ``calibration`` block in ``report.json``.
+``setup(..., with_calibration=False)`` turns it off (run_clips.py: ``--no-calibration``);
+the output then has null ``bbox_pitch`` and GS-HOTA is skipped.
+
 Safe handling: HTTPS to github.com / pypi.org / huggingface.co / storage.googleapis.com
 / download.openmmlab.com only; the repo is checked out at a pinned commit; the
 token is read from Colab Secrets (``HF_TOKEN``) or from ``/content/.hf_token``,
@@ -72,7 +79,7 @@ def _check_numpy_consistent() -> None:
 def setup(ref: str, repo: str = "https://github.com/aizaguirre3/xg-lab.git", detector_size: str = "medium",
           with_pose: bool = True, hf_dataset: str = "SoccerNet/SN-GSR-2025", hf_revision: str = "main",
           clip_pattern: str = "{split}/{clip}/*", device: str | None = None, install: bool = False,
-          gpu_onnxruntime: bool = True) -> dict:
+          gpu_onnxruntime: bool = True, with_calibration: bool = True) -> dict:
     """Clone at ``ref``, (optionally) install the pinned requirements, load the models. Idempotent per kernel.
 
     ``install=False`` because colab/run_clips.py installs with ``colab install`` and
@@ -116,11 +123,11 @@ def setup(ref: str, repo: str = "https://github.com/aizaguirre3/xg-lab.git", det
         except Exception:  # noqa: BLE001
             pose_dev = "cpu"
     _STATE["pipeline"] = production_pipeline(detector_size=detector_size, device=dev, with_pose=with_pose,
-                                             pose_device=pose_dev)
+                                             pose_device=pose_dev, with_calibration=with_calibration)
     _STATE.update({"head": head, "hf_dataset": hf_dataset, "hf_revision": hf_revision, "clip_pattern": clip_pattern,
-                   "device": dev, "pose_device": pose_dev})
-    info = {"head": head, "device": dev, "pose_device": pose_dev, "setup_seconds": round(time.time() - t0, 1),
-            "backends": _STATE["pipeline"].backends()}
+                   "device": dev, "pose_device": pose_dev, "with_calibration": with_calibration})
+    info = {"head": head, "device": dev, "pose_device": pose_dev, "with_calibration": with_calibration,
+            "setup_seconds": round(time.time() - t0, 1), "backends": _STATE["pipeline"].backends()}
     print("setup", json.dumps(info))
     return info
 
@@ -167,10 +174,15 @@ def process_clip(clip: str, split: str = "valid", local_root: str | None = None,
             rep["gs_hota"] = {"hota": r.hota, "deta": r.deta, "assa": r.assa, "loca": r.loca}
         else:
             rep["gs_hota"] = None
-            rep["notes"].append("GS-HOTA skipped: no pitch coordinates (calibration stage not implemented)")
+            why = ("calibration is off (setup(with_calibration=False))" if not _STATE.get("with_calibration", True)
+                   else "no frame could be calibrated")
+            rep["notes"].append(f"GS-HOTA skipped: no pitch coordinates ({why})")
     (out_dir / "report.json").write_text(json.dumps(rep, indent=1))
     if delete_frames and not local_root:
         shutil.rmtree(clip_dir / (info.im_dir if info else "img1"), ignore_errors=True)
+    cal = rep.get("calibration") or {}
+    cal_txt = (f", calibration {cal.get('calibrated', 0)}/{cal.get('tracked', 0)}/{cal.get('uncalibrated', 0)} "
+               "(calibrated/tracked/uncalibrated)") if cal else ""
     print(f"{clip}: {rep['frames']} frames, {rep['detections']} detections, {rep['tracks']} tracks, "
-          f"{rep['wall_seconds']} s", flush=True)
+          f"{rep['wall_seconds']} s{cal_txt}", flush=True)
     return rep

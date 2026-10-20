@@ -8,15 +8,22 @@ install ``requirements-vision.txt`` plus the GPU build of ONNX Runtime. Stage 2
 (a fresh interpreter, started as a subprocess, because the Colab kernel already
 has numpy and friends imported and must not mix package versions): download the
 RF-DETR, SigLIP and RTMPose weights from their official hosts, render the
-synthetic clip (coloured rectangles on green, 1920x1080, ``--frames`` frames) and
-report installed versions, download sizes, per-stage throughput and peak GPU
+synthetic clip (coloured rectangles standing on a rendered pitch with its real
+markings, seen by a fixed wide broadcast camera, 1920x1080, ``--frames`` frames)
+and report installed versions, download sizes, per-stage throughput and peak GPU
 memory. ``colab run`` provisions, runs and releases the VM; nothing is left running.
 
 The synthetic rectangles are not people, so RF-DETR is expected to detect
 little or nothing on them; detection throughput does not depend on content, and
 the tracking, embedding and pose stages are timed on the clip's ground-truth
-boxes. The CPU smoke pipeline is also run and scored with GS-HOTA to close the
-loader -> pipeline -> metric loop. No SoccerNet data is involved.
+boxes. Camera calibration (``FrameCalibrator``, classical line detection plus a
+homography search, CPU only) is timed on the same frames, with its foot-position
+error against the clip's true camera. The static camera makes the clip's frame-1
+pixel -> metre homography valid for every frame, so the CPU smoke pipeline is
+run twice and scored with GS-HOTA to close the loader -> pipeline -> metric loop:
+once with that known homography as the projector, once with the calibrator
+finding the markings itself. The full pipeline run uses the calibrator, as
+``production_pipeline`` does by default. No SoccerNet data is involved.
 
 Local check (Mac, CPU): ``python colab/vision_env_probe.py --repo-dir . --skip-clone
 --skip-install --device cpu --frames 3 --detector-size nano`` (add ``--two-stage``
@@ -136,6 +143,70 @@ def stage1(args: argparse.Namespace) -> int:
 
 
 # ----------------------------------------------------------------------------
+# Calibration measurements (CPU only; importable without torch, so they run on a laptop too)
+# ----------------------------------------------------------------------------
+
+
+def measure_calibration(frames, gt_feet_px=None, gt_h_px2m=None) -> dict:
+    """Time a fresh ``FrameCalibrator`` over BGR ``frames`` in order.
+
+    ``fps`` / ``seconds`` cover every frame, including the first one (the global
+    homography search, the slow step); ``first_frame_seconds`` and
+    ``later_frame_seconds_mean`` split it from the tracked frames. With
+    ``gt_feet_px`` (per frame, an (N, 2) array of ground-truth bottom-middle
+    pixels) and ``gt_h_px2m`` (per frame, the true pixel -> metre homography) the
+    result also holds the foot-position error in metres of the calibrated frames.
+    """
+    import numpy as np
+
+    from varlab_vision.calibration import FrameCalibrator
+    from varlab_vision.pipeline import HomographyProjector
+
+    cal = FrameCalibrator()
+    per_frame, results = [], []
+    for f in frames:
+        t0 = time.perf_counter()
+        results.append(cal.update(f))
+        per_frame.append(time.perf_counter() - t0)
+    total = sum(per_frame)
+    later = per_frame[1:]
+    statuses = [r.status for r in results]
+    fit = [r.fit_error_px for r in results if r.ok and r.fit_error_px == r.fit_error_px]
+    out = {"frames": len(per_frame), "fps": round(len(per_frame) / total, 2) if total > 0 else None,
+           "seconds": round(total, 3),
+           "first_frame_seconds": round(per_frame[0], 3) if per_frame else None,
+           "later_frame_seconds_mean": round(sum(later) / len(later), 3) if later else None,
+           "statuses": {k: statuses.count(k) for k in sorted(set(statuses))},
+           "fit_error_px_mean": round(float(np.mean(fit)), 3) if fit else None}
+    if gt_feet_px is not None and gt_h_px2m is not None:
+        errs = []
+        for res, pts, h in zip(results, gt_feet_px, gt_h_px2m):
+            if res.ok and len(pts):
+                diff = res.project(pts) - HomographyProjector(h).project(pts)
+                errs.extend(np.hypot(diff[:, 0], diff[:, 1]).tolist())
+        out["foot_error_m_mean"] = round(float(np.mean(errs)), 3) if errs else None
+        out["foot_error_m_max"] = round(float(np.max(errs)), 3) if errs else None
+    return out
+
+
+def smoke_calibrated_run(clip, gt_df, out_path) -> tuple:
+    """CPU smoke backends plus a ``FrameCalibrator`` (no static projector) on ``clip``, scored with
+    GS-HOTA against ``gt_df``; returns ``(RunReport, scores)``."""
+    from varlab_vision import pipeline as pl
+    from varlab_vision.calibration import FrameCalibrator
+    from varlab_vision.gshota import gs_hota
+    from varlab_vision.loaders import objects_frame, read_gsr_clip
+
+    rep = pl.smoke_pipeline(calibrator=FrameCalibrator()).run_clip(clip.clip_dir, out_path, game_id="syn")
+    pred_df = objects_frame(read_gsr_clip(rep.out_path))
+    h_all = gs_hota(gt_df, pred_df)
+    h_pl = gs_hota(gt_df, pred_df, roles=("player",))
+    return rep, {"all_roles": round(h_all.hota, 4), "players_only": round(h_pl.hota, 4),
+                 "deta_players": round(h_pl.deta, 4), "assa_players": round(h_pl.assa, 4),
+                 "loca_players": round(h_pl.loca, 4)}
+
+
+# ----------------------------------------------------------------------------
 # Stage 2: weights, synthetic clip, throughput, memory (fresh interpreter)
 # ----------------------------------------------------------------------------
 
@@ -249,7 +320,11 @@ def stage2(args: argparse.Namespace) -> int:
     gt_boxes = {im.image_id: np.array([o.bbox_image.xyxy for o in gt.objects if o.image_id == im.image_id and o.role != "ball"])
                 for im in gt.images}
     n_people = int(sum(len(b) for b in gt_boxes.values()))
-    R["synthetic"] = {"frames": len(frames), "size": f"{args.width}x{args.height}", "people_boxes": n_people}
+    R["synthetic"] = {"frames": len(frames), "size": f"{args.width}x{args.height}", "people_boxes": n_people,
+                      "camera": "wide_camera, markings drawn", "static_camera": bool(clip.is_static)}
+    if not clip.is_static:
+        print("WARNING: the synthetic camera moves; HomographyProjector(clip.homography) is only right for frame 1",
+              flush=True)
 
     # Per-stage throughput on the real backends -----------------------------------
     S: dict = {}
@@ -291,15 +366,33 @@ def stage2(args: argparse.Namespace) -> int:
         dt = time.time() - t0
         S["rtmpose"] = {"fps": round(len(frames) / dt, 2), "people_per_s": round(n_people / dt, 1), "seconds": round(dt, 3),
                         "device": pose_device}
+
+    # Camera calibration: CPU work (OpenCV + SciPy), timed alone so the cost per frame is recorded.
+    try:
+        gt_feet = [np.array([[(b[0] + b[2]) / 2.0, b[3]] for b in gt_boxes[im.image_id]], float).reshape(-1, 2)
+                   for im in gt.images]
+        S["calib"] = measure_calibration(frames, gt_feet_px=gt_feet, gt_h_px2m=clip.homographies)
+        S["calib"]["note"] = "FrameCalibrator on the rendered markings; CPU only, independent of the GPU stages"
+    except Exception as e:  # noqa: BLE001  (do not lose the weights and GPU numbers over this)
+        S["calib"] = {"error": f"{type(e).__name__}: {e}"}
     R["stages"] = S
     print("stages", json.dumps(S), flush=True)
 
     # Full production pipeline on the clip (code path; expect few detections) ---
+    # The calibrator, not the static projector: this is what production_pipeline() builds by default.
+    from varlab_vision.calibration import FrameCalibrator
+
     prod = pl.VisionPipeline(detector=det, tracker=pl.ByteTrackTracker(frame_rate=25), embedder=emb, pose=pose,
-                             projector=pl.HomographyProjector(clip.homography))
-    rep = prod.run_clip(clip.clip_dir, work / "pred_prod" / "Labels-GameState.json", game_id="syn")
-    R["production_run"] = rep.as_dict()
-    print(rep.summary(), flush=True)
+                             calibrator=FrameCalibrator())
+    try:
+        rep = prod.run_clip(clip.clip_dir, work / "pred_prod" / "Labels-GameState.json", game_id="syn")
+        R["production_run"] = rep.as_dict()
+        print(rep.summary(), flush=True)
+    except Exception as e:  # noqa: BLE001  (keep the weights and throughput numbers measured so far)
+        import traceback
+
+        traceback.print_exc()
+        R["production_run"] = {"error": f"{type(e).__name__}: {e}"}
 
     # Smoke pipeline + GS-HOTA closed loop (CPU backends) --------------------------
     smoke = pl.smoke_pipeline(projector=pl.HomographyProjector(clip.homography))
@@ -310,6 +403,13 @@ def stage2(args: argparse.Namespace) -> int:
     R["smoke_gs_hota"] = {"all_roles": round(h_all.hota, 4), "players_only": round(h_pl.hota, 4),
                           "deta_players": round(h_pl.deta, 4), "assa_players": round(h_pl.assa, 4)}
     print(rep_s.summary()); print("smoke GS-HOTA", R["smoke_gs_hota"], flush=True)
+    try:
+        rep_c, R["smoke_calibrated_gs_hota"] = smoke_calibrated_run(
+            clip, gt_df, work / "pred_smoke_calib" / "Labels-GameState.json")
+        R["smoke_calibrated_run"] = rep_c.as_dict()
+        print(rep_c.summary()); print("smoke GS-HOTA (calibrated)", R["smoke_calibrated_gs_hota"], flush=True)
+    except Exception as e:  # noqa: BLE001
+        R["smoke_calibrated_gs_hota"] = {"error": f"{type(e).__name__}: {e}"}
 
     # Memory ----------------------------------------------------------------------
     if device == "cuda":
