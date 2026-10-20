@@ -181,13 +181,17 @@ def project_model_lines(h_px2m: np.ndarray, model_abc: np.ndarray) -> np.ndarray
     return _normalise_lines(model_abc @ np.asarray(h_px2m, float))
 
 
-def _dlt_batch(src: np.ndarray, dst: np.ndarray, ridge: float = 1e-10) -> np.ndarray:
+def _dlt_batch(src: np.ndarray, dst: np.ndarray, ridge: float = 1e-9) -> np.ndarray:
     """Batched 4-point DLT: ``src`` and ``dst`` are (B, 4, 2); returns (B, 3, 3)
     homographies with ``dst ~ H src`` and ``h33 = 1``.
 
-    Solved through the 8x8 normal equations with a tiny ridge so that a degenerate
-    hypothesis (three collinear points) yields a finite but useless matrix instead
-    of raising; the scorer then discards it. Much faster than a batched SVD.
+    Solved through the 8x8 normal equations, each scaled by its own trace and given a
+    small ridge, so every system is positive definite and well scaled. It never raises:
+    a degenerate hypothesis (collinear points, an intersection far outside the image)
+    comes back finite but useless, or NaN, and the scorer discards it. This matters
+    because LAPACK builds differ: OpenBLAS (Linux wheels) raises ``LinAlgError`` on an
+    exactly singular member and would abort the whole batch, where Accelerate (macOS
+    wheels) returned a finite answer for the same system.
     """
     B = src.shape[0]
     x, y = src[..., 0], src[..., 1]
@@ -198,11 +202,24 @@ def _dlt_batch(src: np.ndarray, dst: np.ndarray, ridge: float = 1e-10) -> np.nda
     r2 = np.stack([z, z, z, x, y, o, -v * x, -v * y], axis=-1)
     a = np.concatenate([r1, r2], axis=1)  # (B, 8, 8)
     b = np.concatenate([u, v], axis=1)[..., None]  # (B, 8, 1)
-    ata = np.einsum("bij,bik->bjk", a, a) + ridge * np.eye(8)[None]
+    ata = np.einsum("bij,bik->bjk", a, a)
     atb = np.einsum("bij,bik->bjk", a, b)
-    sol = np.linalg.solve(ata, atb)[..., 0]
-    h = np.concatenate([sol, np.ones((B, 1))], axis=1).reshape(B, 3, 3)
-    return h
+    scale = np.trace(ata, axis1=1, axis2=2) / 8.0
+    good = np.isfinite(scale) & (scale > 0) & np.isfinite(ata).all(axis=(1, 2)) & np.isfinite(atb).all(axis=(1, 2))
+    scale = np.where(good, scale, 1.0)
+    ata = np.where(good[:, None, None], ata / scale[:, None, None], 0.0) + ridge * np.eye(8)[None]
+    atb = np.where(good[:, None, None], atb / scale[:, None, None], 0.0)
+    try:
+        sol = np.linalg.solve(ata, atb)[..., 0]
+    except np.linalg.LinAlgError:  # safety net only; the scaling above makes every system definite
+        sol = np.full((B, 8), np.nan)
+        for i in range(B):
+            try:
+                sol[i] = np.linalg.solve(ata[i], atb[i])[:, 0]
+            except np.linalg.LinAlgError:
+                pass
+    sol[~good] = np.nan
+    return np.concatenate([sol, np.ones((B, 1))], axis=1).reshape(B, 3, 3)
 
 
 def _quad_orientation_ok(pts: np.ndarray, min_area: float = 50.0) -> np.ndarray:
@@ -677,6 +694,12 @@ def search_homography(lines: Sequence[ImageLine], width: int, height: int, model
                         for xa, xb, ya, yb in model_assign])  # (MA, 4, 2)
     IA, MA = len(img_assign), len(model_assign)
     ok_img = np.isfinite(img_pts).all(axis=(1, 2)) & _quad_orientation_ok(img_pts)
+    # Real marking intersections lie within a few frame sizes of the image; a corner ten
+    # frames away comes from two nearly parallel lines, a wrong pairing whose homography
+    # is ill-conditioned anyway.
+    with np.errstate(invalid="ignore"):
+        ok_img &= (np.abs(img_pts - np.array([width / 2.0, height / 2.0]))
+                   <= 10.0 * np.array([width, height], float)).all(axis=(1, 2))
     # normalisation for conditioning
     s_px = np.array([width, height], float)
     s_m = np.array([model.half_length, model.half_width], float)
