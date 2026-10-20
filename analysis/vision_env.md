@@ -79,10 +79,47 @@ as it is written, so two to three runs with `--resume` cover the split and a
 server-side termination loses at most one clip. Pose is the first stage to
 batch when that matters.
 
-Not measured here (no data): real detection quality, team-cluster purity, the
-pitch calibration stage (not implemented; `bbox_pitch` is null without a
-`PitchProjector`), jersey recognition (not implemented; GS-HOTA requires it),
-and the layout of the clips inside the Hugging Face dataset repository.
+Not measured here (no data): real detection quality, team-cluster purity,
+pitch calibration on real broadcast frames (so far only synthetic clips, see
+the calibration section below), jersey recognition (not implemented; GS-HOTA
+requires it), and the layout of the clips inside the Hugging Face dataset
+repository.
+
+## Camera calibration (added 2026-10-19)
+
+Measured on 2026-10-19 on the Mac CPU (Apple M5), not on the Colab L4, and
+only on synthetic clips. The synthetic clip renders the pitch markings under a
+known pinhole broadcast camera, so the calibration can be scored against ground
+truth. The stage (`varlab_vision/pitch_model.py`, `varlab_vision/calibration.py`) is
+classical and uses only numpy, SciPy and OpenCV. A frame counts as calibrated
+only when at least 4 lines match, with at least two from each family;
+otherwise it is reported uncalibrated with null pitch coordinates.
+
+| Check | Result (synthetic clips) |
+|---|---|
+| Global search accuracy | 24 scenes (6 camera positions x wide and medium views x 1280x720 and 1920x1080), all calibrated |
+| Global search, worst keypoint error | 0.040 m (wide view at 1280x720); at most 0.021 m in the other three groups |
+| Tracking, 0.8 m/frame pan | within 0.060 m at the keypoints |
+| Tracking, steady pans of 1.5 and 3.0 m/frame | followed with no lag (the earlier linear blend lagged 1.8 m behind a 1.5 m/frame pan) |
+| Tracking, 6 m/frame pan | falls back to the global search and stays within 0.5 m |
+| Shot-cut rule | flagged when the grey-thumbnail difference is at least 25 (0-255 scale) or the hue-saturation histogram distance is at least 0.2 |
+| Within a shot | grey difference 2.0 to 5.8; histogram distance 0.02 to 0.05 |
+| At a cut | histogram distance 0.33 to 0.89 |
+| Line extraction | 44 to 62 ms per frame |
+| Global search | 0.6 to 0.84 s (first frame and after a cut) |
+| Tracked frame | 58 to 88 ms at both 1280x720 and 1920x1080; about one minute of CPU per 750-frame 1080p clip |
+| Pipeline, wide camera at 1280x720, 8 frames, players only | GS-HOTA 1.0 on four scenes |
+| Calibration foot-position error | at most 0.013 m (ground-truth boxes through the written homographies) |
+| End-to-end foot error | up to 0.65 m; the CPU smoke detector's boxes sit 0 or 1 px below the drawn rectangles, and one pixel at the far touchline of a 720p wide shot spans about half a metre |
+| Tests | `tests/vision` 84 passed; `tests/python` 40 passed, 4 skipped |
+
+Not measured: accuracy on real broadcast frames (lens distortion, crowds,
+shadows, worn or partly hidden lines, close-ups showing fewer than four
+markings), because no SoccerNet clips are available yet; and the calibrator's
+CPU time on the Colab VM (the probe now measures it, but it has not been run
+since). Known limits: one camera, a planar pitch, no lens distortion, straight
+markings only (the centre circle and arcs are not used), and at least four
+markings in view. The synthetic numbers are an upper bound on real accuracy.
 
 ## Two things the first runs taught
 

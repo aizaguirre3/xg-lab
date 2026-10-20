@@ -137,6 +137,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument("--clip-timeout", type=float, default=900.0)
     p.add_argument("--detector-size", default="medium", choices=["nano", "small", "medium", "large"])
     p.add_argument("--no-pose", action="store_true")
+    p.add_argument("--no-calibration", action="store_true",
+                   help="skip the per-frame pitch-line calibration (null bbox_pitch, no GS-HOTA); it costs CPU time per frame")
     p.add_argument("--hf-dataset", default="SoccerNet/SN-GSR-2025", help="Hugging Face dataset repo id")
     p.add_argument("--hf-revision", default="main", help="pin to a dataset commit once known")
     p.add_argument("--clip-pattern", default="{split}/{clip}/*", help="allow_patterns template inside the dataset repo")
@@ -195,8 +197,9 @@ def run(args: argparse.Namespace, runner: Optional[Runner] = None) -> int:
         session.restart_kernel()
         session.exec_file(WORKER, timeout=args.setup_timeout)
         setup_call = (f"setup(ref={args.ref!r}, repo={args.repo!r}, detector_size={args.detector_size!r}, "
-                      f"with_pose={not args.no_pose!r}, hf_dataset={args.hf_dataset!r}, "
-                      f"hf_revision={args.hf_revision!r}, clip_pattern={args.clip_pattern!r})")
+                      f"with_pose={not args.no_pose!r}, with_calibration={not args.no_calibration!r}, "
+                      f"hf_dataset={args.hf_dataset!r}, hf_revision={args.hf_revision!r}, "
+                      f"clip_pattern={args.clip_pattern!r})")
         session.exec_code(setup_call, timeout=args.setup_timeout)
         for clip in todo:
             elapsed = time.monotonic() - t_start

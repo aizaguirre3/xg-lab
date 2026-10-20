@@ -22,11 +22,22 @@ pitch projector is given, else null). Keypoints, when computed, go under the
 extra key ``keypoints`` (COCO-17 ``[x, y, score]`` per joint); the loader keeps
 unknown keys in ``ObjectAnnotation.extra``.
 
+Pitch coordinates come from one of two sources: a static ``PitchProjector``
+(a known homography, used by the synthetic smoke test) or a per-frame
+``FrameCalibrator`` from ``calibration.py`` that finds the markings in every
+frame. With a calibrator each object also carries ``pitch_x`` / ``pitch_y``
+(metres, bottom-middle; null when the frame is uncalibrated), ``calib_error``
+(the frame's RMS line-fit error in pixels; null when unknown) and ``calib_status``
+in its extra keys, and every frame gets a ``camera`` annotation record
+(``calibration``: homography and diagnostics). ``bbox_pitch`` is null on every
+frame without a calibration and on any box whose projection is not finite, so
+the JSON never contains NaN or Infinity. ``has_labeled_camera`` on the image
+record is true only when that frame's calibration is usable.
+
 Known placeholders, to be replaced in later M4 work: every tracked person is
 written with role ``player`` (no referee / goalkeeper classifier yet); the two
 colour clusters are named ``left`` / ``right`` by their mean image x, not by
-pitch side; jersey numbers are always null; pitch coordinates need a real
-calibration stage (``PitchProjector`` is the hook).
+pitch side; jersey numbers are always null.
 """
 from __future__ import annotations
 
@@ -34,7 +45,7 @@ import math
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Protocol, Sequence, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Protocol, Sequence, Tuple
 
 import numpy as np
 
@@ -58,10 +69,14 @@ from .gsr_format import (
 )
 from .loaders import FrameSequence, list_frames
 
+if TYPE_CHECKING:  # typing only; calibration imports scipy, which the smoke path does not need
+    from .calibration import CalibrationResult, FrameCalibrator  # noqa: F401
+
 CLASS_PERSON = "person"
 CLASS_BALL = "ball"
 BALL_TRACK_ID = 0  # single ball track; people get ids >= 1
 UNASSIGNED = -1
+CAMERA_ANNOTATION_INDEX = 9000  # per-frame camera record id = image_id + this index, past any object index
 
 # COCO ids as used by rfdetr.assets.coco_classes (91-id scheme).
 COCO_PERSON_ID = 1
@@ -153,24 +168,34 @@ class PitchProjector(Protocol):
 
 
 class ColorBlobDetector:
-    """Non-green connected components; the smoke-test stand-in for a person detector."""
+    """Saturated or dark connected components on grass; the smoke-test stand-in for a
+    person detector. Green (the pitch) and bright low-saturation pixels (the white
+    markings) are background, so the rendered lines do not merge the rectangles."""
 
     name = "color-blob"
 
     def __init__(self, min_area: int = 80, max_area: Optional[int] = None,
-                 green_hue: Tuple[int, int] = (35, 85), min_sat: int = 60):
+                 green_hue: Tuple[int, int] = (35, 85), min_sat: int = 60,
+                 white_max_sat: int = 70, white_min_val: int = 150, open_px: int = 3):
         self.min_area = min_area
         self.max_area = max_area
         self.green_hue = green_hue
         self.min_sat = min_sat
+        self.white_max_sat = white_max_sat
+        self.white_min_val = white_min_val
+        self.open_px = open_px
 
     def detect(self, frame_bgr: np.ndarray) -> FrameDetections:
         import cv2
 
         hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
-        h, s = hsv[..., 0], hsv[..., 1]
+        h, s, v = hsv[..., 0], hsv[..., 1], hsv[..., 2]
         is_green = (h >= self.green_hue[0]) & (h <= self.green_hue[1]) & (s >= self.min_sat)
-        fg = (~is_green).astype(np.uint8)
+        is_white = (s <= self.white_max_sat) & (v >= self.white_min_val)
+        fg = (~(is_green | is_white)).astype(np.uint8)
+        if self.open_px > 1:
+            k = cv2.getStructuringElement(cv2.MORPH_RECT, (self.open_px, self.open_px))
+            fg = cv2.morphologyEx(fg, cv2.MORPH_OPEN, k)
         n, _labels, stats, _cent = cv2.connectedComponentsWithStats(fg, connectivity=8)
         boxes, conf = [], []
         for k in range(1, n):
@@ -556,6 +581,7 @@ class RunReport:
     stages: Dict[str, StageTimer] = field(default_factory=dict)
     backends: Dict[str, str] = field(default_factory=dict)
     notes: List[str] = field(default_factory=list)
+    calibration: Dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -569,12 +595,13 @@ class RunReport:
                            "per_second": (round(v.per_second, 2) if v.seconds > 0 else None)}
                        for k, v in self.stages.items()},
             "notes": list(self.notes),
+            "calibration": dict(self.calibration),
         }
 
     def summary(self) -> str:
         parts = [f"{self.clip_name}: {self.n_frames} frames, {self.n_detections} detections, {self.n_tracks} tracks"]
         for k, v in self.stages.items():
-            unit = "fps" if k in ("read", "detect", "track", "pose", "total") else "items/s"
+            unit = "fps" if k in ("read", "detect", "track", "pose", "calib", "total") else "items/s"
             parts.append(f"  {k:<8} {v.seconds:8.3f} s  {v.per_second:8.2f} {unit}")
         return "\n".join(parts)
 
@@ -583,12 +610,14 @@ class VisionPipeline:
     def __init__(self, detector: Detector, tracker: Optional[Tracker] = None,
                  embedder: Optional[CropEmbedder] = None, pose: Optional[PoseEstimator] = None,
                  projector: Optional[PitchProjector] = None, frame_rate: float = 25.0,
-                 max_crops_per_track: int = 20, team_k: int = 2, seed: int = 0):
+                 max_crops_per_track: int = 20, team_k: int = 2, seed: int = 0,
+                 calibrator: Optional["FrameCalibrator"] = None):
         self.detector = detector
         self.tracker = tracker if tracker is not None else default_tracker(frame_rate)
         self.embedder = embedder
         self.pose = pose
         self.projector = projector
+        self.calibrator = calibrator  # per-frame line calibration; overrides ``projector`` when set
         self.frame_rate = frame_rate
         self.max_crops_per_track = max_crops_per_track
         self.team_k = team_k
@@ -600,7 +629,8 @@ class VisionPipeline:
             "tracker": getattr(self.tracker, "name", type(self.tracker).__name__),
             "embedder": getattr(self.embedder, "name", "none") if self.embedder else "none",
             "pose": getattr(self.pose, "name", "none") if self.pose else "none",
-            "projector": getattr(self.projector, "name", "none") if self.projector else "none",
+            "projector": (getattr(self.calibrator, "name", "line-calibration") if self.calibrator is not None
+                          else (getattr(self.projector, "name", "none") if self.projector is not None else "none")),
         }
 
     # -- per-frame work -----------------------------------------------------
@@ -623,6 +653,18 @@ class VisionPipeline:
             timers["pose"].add(time.perf_counter() - t0, 1)
         return dets
 
+    def _calibrate(self, frame_bgr: np.ndarray) -> "CalibrationResult":
+        """One calibrator step. A frame the calibrator chokes on (a singular homography on a degenerate
+        view, say) is reported uncalibrated with the reason in ``note`` and the calibrator is reset,
+        rather than aborting a clip that has already cost minutes of detector time."""
+        try:
+            return self.calibrator.update(frame_bgr)
+        except Exception as e:  # noqa: BLE001
+            from .calibration import STATUS_UNCALIBRATED, CalibrationResult
+
+            self.calibrator.reset()
+            return CalibrationResult(status=STATUS_UNCALIBRATED, note=f"calibrator raised {type(e).__name__}: {e}")
+
     # -- whole clip ---------------------------------------------------------
     def run_clip(self, clip_dir: Path | str, out_path: Path | str, clip_name: Optional[str] = None,
                  game_id: str = "", frames: Optional[FrameSequence] = None,
@@ -632,11 +674,14 @@ class VisionPipeline:
         clip_dir = Path(clip_dir)
         seq = frames if frames is not None else list_frames(clip_dir, None, strict=False)
         name = clip_name or clip_dir.name
-        timers = {k: StageTimer() for k in ("read", "detect", "track", "pose", "team", "write", "total")}
+        timers = {k: StageTimer() for k in ("read", "detect", "track", "pose", "calib", "team", "write", "total")}
         self.tracker.reset()
+        if self.calibrator is not None:
+            self.calibrator.reset()
         t_all = time.perf_counter()
 
         per_frame: List[Tuple[int, int, int, FrameDetections]] = []  # (frame_idx, w, h, dets)
+        calib: List["CalibrationResult"] = []
         crops: Dict[int, List[Tuple[int, np.ndarray, float]]] = {}  # track -> [(frame, crop, cx)]
         n = len(seq)
         stride = max(1, n // self.max_crops_per_track)
@@ -649,6 +694,10 @@ class VisionPipeline:
             dets = self.process_frame(frame, timers)
             h, w = frame.shape[:2]
             per_frame.append((fidx, w, h, dets))
+            if self.calibrator is not None:
+                t0 = time.perf_counter()
+                calib.append(self._calibrate(frame))
+                timers["calib"].add(time.perf_counter() - t0, 1)
             if self.embedder is not None and dets.tracker_id is not None and k % stride == 0:
                 for i in range(len(dets)):
                     tid = int(dets.tracker_id[i])
@@ -680,38 +729,76 @@ class VisionPipeline:
 
         # Write the GSR-layout JSON.
         t0 = time.perf_counter()
-        clip = self._to_gsr(name, game_id, per_frame, team_of)
+        clip = self._to_gsr(name, game_id, per_frame, team_of, calib if self.calibrator is not None else None)
         out_path = Path(out_path)
         write_labels_json(clip, out_path)
         timers["write"].add(time.perf_counter() - t0, 1)
         timers["total"].add(time.perf_counter() - t_all, n)
         n_det = sum(len(d) for _, _, _, d in per_frame)
         tracks = {int(t) for _, _, _, d in per_frame if d.tracker_id is not None for t in d.tracker_id if t > 0}
+        summary = _calibration_summary(calib) if self.calibrator is not None else {}
+        n_unc = int(summary.get("uncalibrated", 0))
+        if n_unc and n_unc == n:
+            reason = next((r.note for r in calib if r is not None and r.note), "")
+            notes.append(f"calibration: all {n} frames uncalibrated, no pitch coordinates written"
+                         + (f" ({reason})" if reason else ""))
+        elif n_unc:
+            notes.append(f"calibration: {n_unc} of {n} frames uncalibrated")
         return RunReport(clip_name=name, n_frames=n, n_detections=n_det, n_tracks=len(tracks), out_path=out_path,
-                         stages=timers, backends=self.backends(), notes=notes)
+                         stages=timers, backends=self.backends(), notes=notes, calibration=summary)
 
-    def _to_gsr(self, name: str, game_id: str, per_frame, team_of: Dict[int, str]) -> GSRClip:
+    def _to_gsr(self, name: str, game_id: str, per_frame, team_of: Dict[int, str],
+                calib: Optional[List["CalibrationResult"]] = None) -> GSRClip:
+        """Build the clip. ``calib`` is None without a calibrator, else one result per frame, in order."""
+        if calib is not None and len(calib) != len(per_frame):
+            raise ValueError(f"{len(calib)} calibration results for {len(per_frame)} frames")
         cats = parse_categories(default_categories_list())
         clip_id = "".join(ch for ch in name if ch.isdigit()) or "0"
         images: List[ImageRecord] = []
         objects: List[ObjectAnnotation] = []
-        for fidx, w, h, dets in per_frame:
+        cameras: List[Dict[str, Any]] = []
+        camera_cid = category_id_for_role("camera", cats)
+        for k, (fidx, w, h, dets) in enumerate(per_frame):
             image_id = new_image_id(clip_id, fidx)
+            res = calib[k] if calib is not None else None
             images.append(ImageRecord(image_id=image_id, file_name=frame_file_name(fidx), width=w, height=h,
-                                      is_labeled=True, has_labeled_person=True))
+                                      is_labeled=True, has_labeled_person=True,
+                                      has_labeled_camera=bool(res is not None and res.ok)))
+            if res is not None:
+                cameras.append({"id": new_annotation_id(image_id, CAMERA_ANNOTATION_INDEX), "image_id": image_id,
+                                "supercategory": "camera", "category_id": camera_cid, "calibration": res.as_dict()})
             if len(dets) == 0:
                 continue
             lefts = np.stack([dets.xyxy[:, 0], dets.xyxy[:, 3]], axis=1)
             rights = np.stack([dets.xyxy[:, 2], dets.xyxy[:, 3]], axis=1)
+            # Bottom corners in metres, (N, 2) each; None when there is no source for them (an
+            # uncalibrated frame, or no calibrator and no static projector). With a calibrator the
+            # static projector is never consulted: one clip must not mix two coordinate sources.
             pl = pr = None
-            if self.projector is not None:
+            if res is not None:
+                if res.ok:
+                    pl, pr = res.project(lefts), res.project(rights)
+            elif self.projector is not None:
                 pl, pr = self.projector.project(lefts), self.projector.project(rights)
             for i in range(len(dets)):
                 x1, y1, x2, y2 = map(float, dets.xyxy[i])
                 tid = int(dets.tracker_id[i]) if dets.tracker_id is not None else UNASSIGNED
                 is_ball = dets.class_name[i] == CLASS_BALL
                 role = ROLE_BALL if is_ball else ROLE_PLAYER
+                # One finite check decides bbox_pitch and pitch_x / pitch_y together, so a box whose
+                # projection is NaN or infinite (a corner on the horizon) is null in both and the
+                # JSON never holds a NaN.
+                bbox_pitch = None
+                if pl is not None and np.isfinite(pl[i]).all() and np.isfinite(pr[i]).all():
+                    bbox_pitch = BBoxPitch.from_points((float(pl[i, 0]), float(pl[i, 1])),
+                                                       (float(pr[i, 0]), float(pr[i, 1])))
                 extra: Dict[str, Any] = {"confidence": round(float(dets.confidence[i]), 4)}
+                if res is not None:
+                    mid = bbox_pitch.xy if bbox_pitch is not None else None
+                    extra["pitch_x"] = None if mid is None else round(mid[0], 3)
+                    extra["pitch_y"] = None if mid is None else round(mid[1], 3)
+                    extra["calib_error"] = None if math.isnan(res.fit_error_px) else round(res.fit_error_px, 3)
+                    extra["calib_status"] = res.status
                 if dets.keypoints is not None and not is_ball:
                     kp = dets.keypoints[i]; sc = dets.keypoint_scores[i]
                     if not np.isnan(kp).all():
@@ -723,30 +810,63 @@ class VisionPipeline:
                     category_id=category_id_for_role(role, cats), role=role,
                     team=None if is_ball else team_of.get(tid), jersey=None,
                     bbox_image=BBoxImage(x=x1, y=y1, w=x2 - x1, h=y2 - y1),
-                    bbox_pitch=(BBoxPitch.from_points(tuple(pl[i]), tuple(pr[i])) if pl is not None else None),
-                    extra=extra))
+                    bbox_pitch=bbox_pitch, extra=extra))
         info = ClipInfo(name=name, game_id=game_id, clip_id=clip_id, version="1.3", frame_rate=self.frame_rate,
                         seq_length=len(per_frame), extra={"generator": "varlab_vision.pipeline", "backends": self.backends()})
-        return GSRClip(path=Path(name) / LABELS_FILE, info=info, images=images, objects=objects, categories=cats)
+        return GSRClip(path=Path(name) / LABELS_FILE, info=info, images=images, objects=objects, categories=cats,
+                       other_annotations=cameras)
+
+
+def _calibration_summary(calib: Sequence[Optional["CalibrationResult"]]) -> Dict[str, Any]:
+    """Per-clip calibration diagnostics for the run report."""
+    res = [r for r in calib if r is not None]
+    if not res:
+        return {}
+    ok = [r for r in res if r.ok]
+    fit = [r.fit_error_px for r in ok if not math.isnan(r.fit_error_px)]
+    rep = [r.reprojection_error_m for r in ok if not math.isnan(r.reprojection_error_m)]
+    return {
+        "frames": len(res),
+        "calibrated": sum(1 for r in res if r.status == "calibrated"),
+        "tracked": sum(1 for r in res if r.status == "tracked"),
+        "uncalibrated": sum(1 for r in res if not r.ok),
+        "shot_cuts": sum(1 for r in res if r.shot_cut),
+        "fit_error_px_mean": (round(float(np.mean(fit)), 3) if fit else None),
+        "fit_error_px_max": (round(float(np.max(fit)), 3) if fit else None),
+        "reprojection_error_m_mean": (round(float(np.mean(rep)), 3) if rep else None),
+        "inliers_mean": (round(float(np.mean([r.n_inliers for r in ok])), 2) if ok else None),
+    }
 
 
 def smoke_pipeline(projector: Optional[PitchProjector] = None, frame_rate: float = 25.0,
-                   tracker: Optional[Tracker] = None) -> VisionPipeline:
+                   tracker: Optional[Tracker] = None, calibrator: Optional["FrameCalibrator"] = None) -> VisionPipeline:
     """CPU-only backends; exercises the code path on the synthetic clip, nothing more."""
     return VisionPipeline(detector=ColorBlobDetector(), tracker=tracker or default_tracker(frame_rate),
-                          embedder=MeanColorEmbedder(), pose=None, projector=projector, frame_rate=frame_rate)
+                          embedder=MeanColorEmbedder(), pose=None, projector=projector, frame_rate=frame_rate,
+                          calibrator=calibrator)
 
 
 def production_pipeline(detector_size: str = "medium", threshold: float = 0.5, device: Optional[str] = None,
                         with_pose: bool = True, pose_device: Optional[str] = None,
                         siglip_revision: Optional[str] = SigLIPEmbedder.DEFAULT_REVISION,
-                        projector: Optional[PitchProjector] = None, frame_rate: float = 25.0) -> VisionPipeline:
-    """RF-DETR + ByteTrack + SigLIP/k-means (+ RTMPose). Needs requirements-vision.txt and the weights."""
+                        projector: Optional[PitchProjector] = None, frame_rate: float = 25.0,
+                        calibrator: Optional["FrameCalibrator"] = None, with_calibration: bool = True) -> VisionPipeline:
+    """RF-DETR + ByteTrack + SigLIP/k-means (+ RTMPose) with per-frame line calibration.
+    Needs requirements-vision.txt and the weights.
+
+    Calibration: an explicit ``calibrator`` is used as given; otherwise a default ``FrameCalibrator`` is
+    built unless ``with_calibration`` is False or a static ``projector`` is passed (a known homography
+    replaces the calibrator, it is not combined with it)."""
     import torch
+
+    if calibrator is None and with_calibration and projector is None:
+        from .calibration import FrameCalibrator
+
+        calibrator = FrameCalibrator()
 
     dev = device or ("cuda" if torch.cuda.is_available() else "cpu")
     pose = RTMPoseEstimator(device=(pose_device or ("cuda" if dev.startswith("cuda") else "cpu"))) if with_pose else None
     return VisionPipeline(detector=RFDETRDetector(size=detector_size, threshold=threshold, device=dev),
                           tracker=ByteTrackTracker(frame_rate=frame_rate),
                           embedder=SigLIPEmbedder(revision=siglip_revision, device=dev),
-                          pose=pose, projector=projector, frame_rate=frame_rate)
+                          pose=pose, projector=projector, frame_rate=frame_rate, calibrator=calibrator)

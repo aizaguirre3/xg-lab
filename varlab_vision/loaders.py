@@ -65,6 +65,16 @@ def read_gsr_clip(path: Path | str) -> GSRClip:
     return GSRClip(path=p, info=info, images=images, objects=objects, categories=categories, other_annotations=others)
 
 
+def _float_or_nan(v: Any) -> float:
+    """``float(v)`` for a number, NaN for None / missing / anything that is not numeric."""
+    if v is None or isinstance(v, bool):
+        return float("nan")
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return float("nan")
+
+
 def objects_frame(clip: GSRClip, labeled_only: bool = True) -> pd.DataFrame:
     """Flatten the object annotations to one row per (frame, object).
 
@@ -73,6 +83,13 @@ def objects_frame(clip: GSRClip, labeled_only: bool = True) -> pd.DataFrame:
     ``w``, ``h`` (pixels, top-left), ``x_pitch``, ``y_pitch`` (metres, bottom-middle,
     NaN when ``bbox_pitch`` is null). ``labeled_only`` drops frames whose image
     record says ``is_labeled`` is false.
+
+    Two optional columns come last and are read from ``ObjectAnnotation.extra``,
+    where the vision pipeline puts them when it ran a per-frame calibrator:
+    ``calib_error`` (the frame's RMS line-fit error in pixels; NaN when the key is
+    absent or null) and ``calib_status`` (``calibrated`` / ``tracked`` /
+    ``uncalibrated``; None when absent). Annotations that never went through a
+    calibrator, such as the ground truth, have NaN / None in both.
     """
     by_id = clip.image_by_id()
     rows: List[Dict[str, Any]] = []
@@ -98,13 +115,60 @@ def objects_frame(clip: GSRClip, labeled_only: bool = True) -> pd.DataFrame:
                 "h": o.bbox_image.h,
                 "x_pitch": xp,
                 "y_pitch": yp,
+                "calib_error": _float_or_nan(o.extra.get("calib_error")),
+                "calib_status": o.extra.get("calib_status"),
             }
         )
     cols = ["frame", "image_id", "track_id", "category_id", "role", "team", "jersey",
-            "x", "y", "w", "h", "x_pitch", "y_pitch"]
+            "x", "y", "w", "h", "x_pitch", "y_pitch", "calib_error", "calib_status"]
     df = pd.DataFrame(rows, columns=cols)
     if len(df):
         df = df.sort_values(["frame", "track_id"], kind="stable").reset_index(drop=True)
+    return df
+
+
+CAMERA_COLUMNS = ["frame", "image_id", "status", "n_inliers", "fit_error_px", "reprojection_error_m", "shot_cut"]
+
+
+def camera_frame(clip: GSRClip) -> pd.DataFrame:
+    """One row per camera record (``supercategory == "camera"``), ordered by frame.
+
+    Columns: ``frame`` (1-based index of the image the record belongs to),
+    ``image_id``, ``status`` (``calibrated`` / ``tracked`` / ``uncalibrated``),
+    ``n_inliers`` (markings matched to the pitch model), ``fit_error_px``,
+    ``reprojection_error_m`` (NaN when null) and ``shot_cut``. These are the
+    diagnostics under the record's ``calibration`` key, which the vision pipeline
+    writes for every frame it calibrates. A camera record without that key (the
+    ground truth keeps pan / tilt / position under ``camera`` instead) yields a
+    row with ``status`` None, NaN numbers and ``shot_cut`` False; a clip with no
+    camera records gives an empty frame with these columns.
+    """
+    by_id = clip.image_by_id()
+    rows: List[Dict[str, Any]] = []
+    for d in clip.other_annotations:
+        if d.get("supercategory") != "camera":
+            continue
+        image_id = str(d.get("image_id"))
+        im = by_id.get(image_id)
+        if im is None:
+            raise ValueError(f"{clip.path}: camera record {d.get('id')} refers to unknown image_id {image_id}")
+        cal = d.get("calibration")
+        cal = cal if isinstance(cal, dict) else {}
+        n_in = cal.get("n_inliers")
+        rows.append(
+            {
+                "frame": im.frame_index,
+                "image_id": image_id,
+                "status": cal.get("status"),
+                "n_inliers": float("nan") if n_in is None else int(n_in),
+                "fit_error_px": _float_or_nan(cal.get("fit_error_px")),
+                "reprojection_error_m": _float_or_nan(cal.get("reprojection_error_m")),
+                "shot_cut": bool(cal.get("shot_cut", False)),
+            }
+        )
+    df = pd.DataFrame(rows, columns=CAMERA_COLUMNS)
+    if len(df):
+        df = df.sort_values("frame", kind="stable").reset_index(drop=True)
     return df
 
 
