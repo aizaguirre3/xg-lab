@@ -151,23 +151,43 @@ def test_pitch_extras_equal_the_bbox_pitch_bottom_middle(wide):
         assert y == pytest.approx((o.bbox_pitch.y_bottom_left + o.bbox_pitch.y_bottom_right) / 2)
 
 
+def test_written_homographies_place_the_true_feet_within_centimetres(wide):
+    """Calibration on its own: the ground-truth boxes' bottom-middles mapped through each frame's
+    homography as written in the camera record. Measured on this clip (seed 0, 8 frames, 1280x720,
+    wide camera): mean 0.007 m, max 0.013 m."""
+    h_by_image = {c["image_id"]: np.array(c["calibration"]["homography_px2m"], float)
+                  for c in wide.pred.other_annotations if c.get("supercategory") == "camera"}
+    image_of_frame = {im.frame_index: im.image_id for im in wide.pred.images}
+    gdf = objects_frame(wide.gt)
+    errs = []
+    for f, g in gdf.groupby("frame"):
+        h = h_by_image[image_of_frame[f]]
+        pts = np.stack([g["x"] + g["w"] / 2, g["y"] + g["h"], np.ones(len(g))], axis=1) @ h.T
+        xy = pts[:, :2] / pts[:, 2:3]
+        errs.extend(np.hypot(*(xy - g[["x_pitch", "y_pitch"]].to_numpy()).T).tolist())
+    errs = np.array(errs)
+    assert len(errs) == N_WIDE * 6
+    assert errs.max() < 0.05
+
+
 def test_calibrated_positions_match_the_ground_truth(wide):
-    """Foot positions against the known camera. Measured on this clip (seed 0, 8 frames, 1280x720, wide
-    camera): mean 0.33 m, median 0.25 m, max 1.18 m (far-touchline players, where a pixel spans the most
-    metres). The bounds leave room for the calibration code to move."""
+    """End to end, so this includes the colour-blob detector: its box bottoms land 0 or 1 px below the
+    drawn rectangles (anti-aliasing and JPEG), and one pixel at the far touchline of a 720p wide shot spans
+    about half a metre. Measured on this clip: mean 0.23 m, max 0.65 m; seeds 0-3 give max 0.43-0.65 m.
+    The calibration's own share is checked above (under 2 cm)."""
     err = _foot_errors_m(wide.gt, wide.pred)
     assert len(err) == N_WIDE * 6
-    assert err.mean() < 0.75 and err.max() < 2.0
+    assert err.mean() < 0.4 and err.max() < 1.0
 
 
 def test_gs_hota_against_the_ground_truth_is_high(wide):
-    """Measured on this clip (players only, greedy tracker, no referee, 8 frames):
-    GS-HOTA 0.9792, DetA 0.9760, AssA 0.9825, LocA 0.9781. Bounds sit about 0.07 below GS-HOTA."""
+    """Measured on this clip (players only, greedy tracker, no referee, 8 frames): GS-HOTA, DetA and
+    AssA 1.0000, LocA 0.9862; seeds 0-3 all give GS-HOTA 1.0 and LocA 0.986-0.996."""
     gdf, pdf = objects_frame(wide.gt), objects_frame(wide.pred)
     r = gs_hota(gdf, pdf, roles=("player",))
     assert r.n_gt == r.n_pred == N_WIDE * 6
-    assert r.hota > 0.90 and r.deta > 0.90 and r.assa > 0.90
-    assert r.loca > 0.95  # the 5 m kernel is far wider than the ~0.2 m foot error
+    assert r.hota > 0.97 and r.deta > 0.97 and r.assa > 0.97
+    assert r.loca > 0.97  # the 5 m kernel is far wider than the ~0.2 m mean foot error
 
 
 # ----------------------------------------------------------------------------
