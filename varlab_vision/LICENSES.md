@@ -32,5 +32,10 @@ tokenizers, regex, sympy, networkx, jinja2, filelock, fsspec, hf-xet, …) are a
 MIT, BSD, Apache-2.0 or PSF; `pip install` of the pinned file on 2026-10-17 pulled
 no copyleft package. Re-check with `pip-licenses` after any pin change.
 
+The camera-to-pitch calibration (`pitch_model.py` and `calibration.py`, added
+2026-10-19) is our own implementation. It uses only numpy, SciPy and OpenCV,
+which are already listed above, so it adds no dependency, and it reads no code
+from PnLCalib, TrackLab or sn-gamestate.
+
 Excluded on purpose: Ultralytics YOLO (AGPL-3.0), sn-gamestate and TrackLab
 (GPL-3.0), PnLCalib (GPL-2.0), RF-DETR Atto/Femto/Pico/XL/2XL (PML 1.0).

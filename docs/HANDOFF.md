@@ -209,9 +209,28 @@ RF-DETR Medium 46 fps, ByteTrack 823 fps, SigLIP 326 crops/s, RTMPose-m 19.6 fps
 at 11 people (216 people/s); peak GPU memory 1.2 GB reserved (1.6 GB on
 `nvidia-smi`); smoke-pipeline GS-HOTA on the synthetic clip 0.88 (0.92 players
 only). Expect 1.5 to 2 min per real clip, so the 49 validation clips are two to
-three 45-minute runs. Still missing for M4 proper: pitch calibration (own
-implementation; PnLCalib is GPL-2), jersey recognition, a referee/goalkeeper
-role classifier, and the dataset's folder layout on Hugging Face.
+three 45-minute runs. Still missing for M4 proper: jersey recognition, a
+referee/goalkeeper role classifier, and the dataset's folder layout on Hugging
+Face.
+
+Pitch calibration was added on 2026-10-19 (`varlab_vision/pitch_model.py` and
+`varlab_vision/calibration.py`; numbers and limits in `analysis/vision_env.md`).
+It is classical and needs no weights. `production_pipeline` builds a
+`FrameCalibrator` by default. Each object then gets `pitch_x` and `pitch_y` in
+metres (bottom-middle of the box; null on an uncalibrated frame), `calib_error`
+(the frame's RMS line-fit error in pixels) and `calib_status` (`calibrated`,
+`tracked` or `uncalibrated`); `bbox_pitch` is null on uncalibrated frames. Each
+frame gets a camera record whose `calibration` key holds the status, the
+homography and the line and inlier counts, and `has_labeled_camera` is true only
+on frames with a usable calibration (status `calibrated` or `tracked`). `loaders.objects_frame` exposes `calib_error` and
+`calib_status`, and `loaders.camera_frame(clip)` returns the per-frame
+diagnostics. To switch it off, use `setup(with_calibration=False)` in
+`colab/vision_worker.py` or `--no-calibration` in `colab/run_clips.py`. The
+probe times it as a `calib` stage. On the Mac CPU a global search takes 0.6 to
+0.84 s and a tracked frame 58 to 88 ms, about one minute of CPU per 750-frame
+1080p clip; the Colab VM timing has not been measured. Accuracy on real
+broadcast frames is not measured: every number so far comes from synthetic
+clips.
 
 ## 9. Things the cloud session could not verify
 
