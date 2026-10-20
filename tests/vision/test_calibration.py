@@ -346,12 +346,19 @@ def test_tracking_loss_falls_back_to_search_without_a_pixel_cut(tmp_path: Path):
 # ----------------------------------------------------------------------------
 
 
-def test_probe_clip_has_every_actor_in_frame_and_none_overlapping(tmp_path: Path):
+@pytest.fixture(scope="module")
+def probe_clip(tmp_path_factory):
+    """Exactly what colab/vision_env_probe.py renders (the actor placement depends on the
+    clip length, so it must be the full 30 frames)."""
+    return render_synthetic_clip(tmp_path_factory.mktemp("probe"), n_frames=30, width=1920, height=1080,
+                                 n_per_team=5, box_wh=(60, 140), seed=0)
+
+
+def test_probe_clip_has_every_actor_in_frame_and_none_overlapping(probe_clip):
     """``render_synthetic_clip(out, n_frames=30, width=1920, height=1080, n_per_team=5,
     box_wh=(60, 140), seed=0)`` is what the Colab probe renders: 10 players and the referee,
     all in frame in every frame and never overlapping (the smoke detector would merge them)."""
-    clip = render_synthetic_clip(tmp_path, n_frames=30, width=1920, height=1080, n_per_team=5,
-                                 box_wh=(60, 140), seed=0)
+    clip = probe_clip
     df = objects_frame(read_gsr_clip(clip.labels_path))
     per_frame = df.groupby("frame").size()
     assert (per_frame == 11).all() and len(per_frame) == 30
@@ -361,3 +368,68 @@ def test_probe_clip_has_every_actor_in_frame_and_none_overlapping(tmp_path: Path
         for a in range(len(g)):
             for b in range(a + 1, len(g)):
                 assert x1[a] <= x0[b] or x1[b] <= x0[a] or y1[a] <= y0[b] or y1[b] <= y0[a]
+
+
+def test_probe_clip_calibrates_every_frame_despite_the_players(probe_clip):
+    """Regression for the 2026-10-20 Colab probe: with 60x140 px players over the markings,
+    the far touchline breaks into short pieces and the only usable pair of y = const lines
+    is the near touchline with a penalty-area side. The search used to enumerate that pair in
+    descending order, could only build mirrored homographies from it, and left 16 of 30
+    frames uncalibrated with wrong locks of up to 142 m on others. Measured after the fix:
+    frame 1 calibrated, frames 2-30 tracked, worst keypoint error 0.12 m."""
+    fc = cal.FrameCalibrator()
+    worst = 0.0
+    for i in range(1, 31):
+        res = fc.update(_frame(probe_clip, i))
+        assert res.ok, (i, res.status, res.note)
+        assert res.status == (cal.STATUS_CALIBRATED if i == 1 else cal.STATUS_TRACKED), (i, res.status)
+        kp_err, _ = _accuracy(probe_clip, res, i)
+        worst = max(worst, float(kp_err.max()))
+    assert worst < 0.25, worst
+
+
+def _image_line(h_m2px, p0_m, p1_m):
+    """An ImageLine for the model segment p0_m -> p1_m seen through ``h_m2px``."""
+    pts = cal.apply_homography(h_m2px, np.array([p0_m, p1_m], float))
+    d = pts[1] - pts[0]
+    n = np.array([-d[1], d[0]]) / np.linalg.norm(d)
+    return cal.ImageLine(p0=pts[0], p1=pts[1], abc=np.array([n[0], n[1], -n @ pts[0]]), n_pixels=100)
+
+
+def test_search_uses_y_pairs_in_any_model_order():
+    """Only the near touchline (y = 34) and the near penalty-area side (y = 20.16) are visible
+    as y = const lines. The model declares the touchlines first, so that pair comes out in
+    descending order; it must still produce the correct, non-mirrored homography."""
+    cam = wide_camera(1920, 1080)
+    h = cam.homography_m2px()
+    m = DEFAULT_PITCH
+    pw = m.penalty_width / 2.0
+    lines = [
+        _image_line(h, (-52.5, 34.0), (52.5, 34.0)),          # touchline_near
+        _image_line(h, (52.5, -34.0), (52.5, 34.0)),          # goal_line_right
+        _image_line(h, (-52.5, -34.0), (-52.5, 34.0)),        # goal_line_left
+        _image_line(h, (-52.5, pw), (-36.0, pw)),             # penalty_side_near, left box
+        _image_line(h, (36.0, pw), (52.5, pw)),               # penalty_side_near, right box (collinear)
+        _image_line(h, (0.0, -34.0), (0.0, 34.0)),            # halfway
+    ]
+    lines.sort(key=lambda ln: -ln.length)
+    h_est, matches, score = cal.search_homography(lines, 1920, 1080)
+    assert h_est is not None and score > 0
+    names, kp = m.keypoint_array()
+    px, depth = cam.project(kp)
+    vis = (depth > 0) & (px[:, 0] >= 0) & (px[:, 0] < 1920) & (px[:, 1] >= 0) & (px[:, 1] < 1080)
+    err = np.linalg.norm(cal.apply_homography(np.linalg.inv(h_est), px[vis]) - kp[vis], axis=1)
+    assert err.max() < 0.05, err.max()
+    assert {mm.model_name for mm in matches} == {"touchline_near", "goal_line_left", "goal_line_right",
+                                                  "penalty_side_near", "halfway"}
+
+
+def test_distinct_lines_skips_collinear_segments():
+    """Two drawn pieces of one infinite line take one candidate slot, not two."""
+    h = wide_camera(1920, 1080).homography_m2px()
+    pw = DEFAULT_PITCH.penalty_width / 2.0
+    a = _image_line(h, (-52.5, pw), (-36.0, pw))
+    b = _image_line(h, (36.0, pw), (52.5, pw))
+    c = _image_line(h, (0.0, -34.0), (0.0, 34.0))
+    assert cal._distinct_lines([a, b, c], 3, 1920) == [0, 2]
+    assert cal._distinct_lines([a, b, c], 1, 1920) == [0]
