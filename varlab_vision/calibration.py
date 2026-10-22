@@ -25,7 +25,10 @@ PnLCalib (GPL-2) or TrackLab / sn-gamestate (GPL-3). The chain is
    to the global search when tracking has too few correspondences or keeps clearly fewer
    inliers than the last frame (a false lock). A tracked fit goes through an alpha-beta
    (constant-velocity) filter on the eight homography parameters, so a steady pan is
-   followed without lag while fit noise is averaged on a static shot.
+   followed without lag while fit noise is averaged on a static shot. With ``push`` /
+   ``flush`` a frame stride applies: during steady tracking only about one frame in six is
+   fitted and the frames between are interpolated between fits (status ``interpolated``),
+   each one checked against its own markings (see ``DEFAULT_FRAME_STRIDE``).
 
 A frame is **calibrated** only when at least ``min_inliers`` lines match with at
 least two from each family (otherwise the homography is unconstrained along one
@@ -1022,9 +1025,9 @@ def homography_shift_px(h_a_m2px: np.ndarray, h_b_m2px: np.ndarray, width: int, 
 # Frame stride. During steady tracking only one frame in up to ``frame_stride`` is fitted to
 # the markings; the frames between are held back and, once the next fit is in, interpolated
 # between the fits. Measured back to back on the Mac (Apple M5) on a 150-frame 1920x1080 pan,
-# fitting every frame costs 81 ms per frame, nearly all of it line extraction; a held-back
-# frame costs about 2 ms (the shot signature and the alignment check below), so a stride of
-# 6 brings the clip to 17 ms per frame. Interpolation, not extrapolation: the image motion of
+# fitting every frame costs 82 ms per frame, nearly all of it line extraction; a held-back
+# frame costs about 1.5 ms (the shot signature and the alignment check below), so a stride of
+# 6 brings the clip to 17 ms per frame (on the Colab L4 VM's CPU: 0.27 s to 0.056 s). Interpolation, not extrapolation: the image motion of
 # a panning camera is not linear in the homography, so even with the exact velocity a
 # constant-velocity prediction is 0.5 px off after two frames and 1.1 px after three on a
 # 0.8 m/frame pan (1080p), and a broadcast pan also accelerates. A quadratic through the fit
