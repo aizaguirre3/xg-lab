@@ -1,4 +1,4 @@
-"""The pipeline with a per-frame ``FrameCalibrator``: pitch coordinates, camera records, the run report.
+"""The pipeline with a ``FrameCalibrator``: pitch coordinates, camera records, the run report.
 
 CPU only and no SoccerNet data. The clips come from ``synthetic.py``: rectangles standing on a pitch whose
 real markings are drawn under a known broadcast camera, so the calibrated pitch positions can be scored
@@ -48,9 +48,25 @@ def _run(clip, out: Path, **kw) -> SimpleNamespace:
 @pytest.fixture(scope="module")
 def wide(tmp_path_factory) -> SimpleNamespace:
     """Eight frames of the wide camera at 1280x720, three players a side, no referee (the pipeline writes
-    every person as a player, so a referee would only add a constant false positive to the metric)."""
+    every person as a player, so a referee would only add a constant false positive to the metric).
+    Every frame is fitted (``frame_stride=1``): these tests pin the per-frame contract; the default
+    frame stride has its own fixture, ``wide_stride``."""
     root = tmp_path_factory.mktemp("calib_wide")
     clip = render_synthetic_clip(root, n_frames=N_WIDE, width=1280, height=720, n_per_team=3,
+                                 with_referee=False, seed=0)
+    run = _run(clip, root / "pred", calibrator=FrameCalibrator(frame_stride=1))
+    return SimpleNamespace(clip=clip, gt=read_gsr_clip(clip.labels_path), **vars(run))
+
+
+N_STRIDE = 14
+
+
+@pytest.fixture(scope="module")
+def wide_stride(tmp_path_factory) -> SimpleNamespace:
+    """The same scene over 14 frames through the default ``FrameCalibrator``, whose frame stride
+    interpolates most frames once tracking is steady."""
+    root = tmp_path_factory.mktemp("calib_wide_stride")
+    clip = render_synthetic_clip(root, n_frames=N_STRIDE, width=1280, height=720, n_per_team=3,
                                  with_referee=False, seed=0)
     run = _run(clip, root / "pred", calibrator=FrameCalibrator())
     return SimpleNamespace(clip=clip, gt=read_gsr_clip(clip.labels_path), **vars(run))
@@ -188,6 +204,53 @@ def test_gs_hota_against_the_ground_truth_is_high(wide):
     assert r.n_gt == r.n_pred == N_WIDE * 6
     assert r.hota > 0.97 and r.deta > 0.97 and r.assa > 0.97
     assert r.loca > 0.97  # the 5 m kernel is far wider than the ~0.2 m mean foot error
+
+
+# ----------------------------------------------------------------------------
+# a'. The default frame stride
+# ----------------------------------------------------------------------------
+
+
+def test_frame_stride_writes_one_calibration_per_frame_and_says_which_are_interpolated(wide_stride):
+    run = wide_stride
+    cams = camera_frame(run.pred)
+    statuses = cams["status"].tolist()
+    assert len(statuses) == N_STRIDE and cams["frame"].tolist() == list(range(1, N_STRIDE + 1))
+    assert statuses[0] == "calibrated" and set(statuses[1:]) == {"tracked", "interpolated"}
+    interp = cams["status"] == "interpolated"
+    # measured: c t t t i t i i t i i i t t (two steady fits, then stretches of 1, 2, 3 held frames;
+    # the clip ends one frame into the next stretch, so flush fits that frame)
+    assert interp.sum() >= 5
+    assert (cams.loc[interp, "n_inliers"] == 0).all() and cams.loc[interp, "fit_error_px"].isna().all()
+    assert (cams.loc[~interp, "n_inliers"] >= 4).all() and cams.loc[~interp, "fit_error_px"].notna().all()
+    assert all(im.has_labeled_camera for im in run.pred.images)
+    for d in run.pred.other_annotations:
+        assert np.isfinite(np.asarray(d["calibration"]["homography_px2m"], float)).all()
+    df = objects_frame(run.pred)
+    assert len(df) == N_STRIDE * 6 and df["x_pitch"].notna().all()
+    assert df.groupby("frame")["calib_status"].first().tolist() == statuses
+    assert df.loc[df["calib_status"] == "interpolated", "calib_error"].isna().all()
+    _strict_json(run.report.out_path)
+    cal = run.report.as_dict()["calibration"]
+    assert (cal["frames"], cal["calibrated"], cal["tracked"], cal["interpolated"], cal["uncalibrated"]) == (
+        N_STRIDE, 1, int((~interp).sum()) - 1, int(interp.sum()), 0)
+    # errors and inliers summarise the fitted frames only
+    assert cal["inliers_mean"] == pytest.approx(cams.loc[~interp, "n_inliers"].mean(), abs=1e-2)
+    assert cal["fit_error_px_mean"] == pytest.approx(cams.loc[~interp, "fit_error_px"].mean(), abs=2e-3)
+    assert run.report.stages["calib"].items == N_STRIDE and run.report.notes == []
+
+
+def test_frame_stride_homographies_place_the_true_feet_within_centimetres(wide_stride):
+    """As for the per-frame run (max 0.013 m there), interpolated frames included."""
+    run = wide_stride
+    h_by_image = {c["image_id"]: np.array(c["calibration"]["homography_px2m"], float)
+                  for c in run.pred.other_annotations}
+    image_of_frame = {im.frame_index: im.image_id for im in run.pred.images}
+    errs = []
+    for f, g in objects_frame(run.gt).groupby("frame"):
+        pts = np.stack([g["x"] + g["w"] / 2, g["y"] + g["h"], np.ones(len(g))], axis=1) @ h_by_image[image_of_frame[f]].T
+        errs.extend(np.hypot(*(pts[:, :2] / pts[:, 2:3] - g[["x_pitch", "y_pitch"]].to_numpy()).T).tolist())
+    assert len(errs) == N_STRIDE * 6 and max(errs) < 0.05
 
 
 # ----------------------------------------------------------------------------
@@ -350,6 +413,47 @@ def test_a_calibrator_failure_on_one_frame_does_not_abort_the_clip(tmp_path: Pat
     by_frame = objects_frame(pred).groupby("frame")["x_pitch"].apply(lambda c: c.notna().all()).tolist()
     assert by_frame == [True, False, True]
     assert pipe.backends()["projector"] == "flaky"
+
+
+class _HoldingFlakyCalibrator:
+    """A ``push`` calibrator that holds frames 2 and 3 back and raises on frame 4."""
+
+    name = "holding-flaky"
+
+    def __init__(self, h_px2m: np.ndarray):
+        self.h, self.calls, self.resets, self.held = h_px2m, 0, 0, 0
+
+    @property
+    def n_pending(self) -> int:
+        return self.held
+
+    def reset(self) -> None:
+        self.resets += 1
+        self.held = 0
+
+    def push(self, frame_bgr: np.ndarray):
+        self.calls += 1
+        if self.calls in (2, 3):
+            self.held += 1
+            return []
+        if self.calls == 4:
+            raise np.linalg.LinAlgError("singular matrix")
+        return [_calibrated(self.h)]
+
+    def flush(self):
+        out, self.held = [_calibrated(self.h)] * self.held, 0
+        return out
+
+
+def test_a_calibrator_failure_while_frames_are_held_marks_them_all_uncalibrated(tmp_path: Path):
+    clip = render_synthetic_clip(tmp_path, n_frames=6, width=640, height=360, n_per_team=2,
+                                 with_referee=False, seed=4, with_markings=False)
+    cal = _HoldingFlakyCalibrator(clip.homography)
+    pipe = pl.smoke_pipeline(tracker=pl.GreedyIoUTracker(), calibrator=cal)
+    report = pipe.run_clip(clip.clip_dir, tmp_path / "pred" / LABELS_FILE, game_id="g")
+    cams = camera_frame(read_gsr_clip(report.out_path))
+    assert cams["status"].tolist() == ["calibrated"] + ["uncalibrated"] * 3 + ["calibrated"] * 2
+    assert cal.resets == 2 and report.calibration["uncalibrated"] == 3
 
 
 def test_calibration_results_must_line_up_with_the_frames():
