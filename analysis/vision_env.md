@@ -111,13 +111,42 @@ otherwise it is reported uncalibrated with null pitch coordinates.
 | Pipeline, wide camera at 1280x720, 8 frames, players only | GS-HOTA 1.0 on four scenes |
 | Calibration foot-position error | at most 0.013 m (ground-truth boxes through the written homographies) |
 | End-to-end foot error | up to 0.65 m; the CPU smoke detector's boxes sit 0 or 1 px below the drawn rectangles, and one pixel at the far touchline of a 720p wide shot spans about half a metre |
-| Tests | `tests/vision` 84 passed; `tests/python` 40 passed, 4 skipped |
+| Tests | `tests/vision` 87 passed; `tests/python` 40 passed, 4 skipped |
+
+### On the Colab L4 (2026-10-20)
+
+The probe ran twice on a fresh L4 VM (12 vCPU) with the 1080p synthetic clip,
+where 60x140 px players stand over the markings. On the merged code
+(`8e0ab92`) the calibration failed: 16 of 30 frames uncalibrated, wrong locks of
+tens of metres on others, 1.2 s per frame. The cause was a pairing bug in the
+global search, invisible on the clean test scenes, fixed in `a4a231c`. On the
+fix, measured on the VM:
+
+| Check | Result |
+|---|---|
+| Frames | 1 calibrated, 29 tracked, 0 uncalibrated |
+| Foot-position error against the true camera | mean 0.021 m, max 0.092 m |
+| Fit error | mean 0.20 px, max 0.53 px |
+| Calibrated smoke run, GS-HOTA | 0.8837 all roles, 0.9231 players (identical to the run given the true camera), LocA 0.9954 |
+| Global search (first frame) | 1.44 s |
+| Tracked frame | 0.264 s mean (3.3 fps), about 3x slower than the Mac |
+
+On the VM the calibrator, not the GPU, is the slowest stage: about 3.3 minutes
+of CPU per 750-frame clip against about 16 s of detection. With pose, a real
+clip would take about 4.5 to 5 minutes instead of the 1.5 to 2 minutes
+estimated above, so the 49 validation clips need roughly four hours of L4
+time. Running the calibration on fewer frames, at lower resolution or in a
+separate process alongside the GPU stages are the obvious ways to win that
+back; none is implemented yet.
+
+Stress test on the Mac after the fix: 24 occluded 1080p clips (60x140 and
+80x180 px players, 5 and 7 per team, wide and medium views, 240 frames), all
+240 frames calibrated or tracked, worst keypoint error 0.20 m; the merged code
+had 40 uncalibrated frames and 32 wrong locks over 1 m on the same clips.
 
 Not measured: accuracy on real broadcast frames (lens distortion, crowds,
 shadows, worn or partly hidden lines, close-ups showing fewer than four
-markings), because no SoccerNet clips are available yet; and the calibrator's
-CPU time on the Colab VM (the probe now measures it, but it has not been run
-since). Known limits: one camera, a planar pitch, no lens distortion, straight
+markings), because no SoccerNet clips are available yet. Known limits: one camera, a planar pitch, no lens distortion, straight
 markings only (the centre circle and arcs are not used), and at least four
 markings in view. The synthetic numbers are an upper bound on real accuracy.
 

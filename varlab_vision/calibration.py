@@ -652,6 +652,31 @@ def _score_hypotheses(h_m2px: np.ndarray, lines: Sequence[ImageLine], model_abc:
     return score, best, inlier
 
 
+def _distinct_lines(lines: Sequence[ImageLine], k: int, width: int) -> List[int]:
+    """Indices of the ``k`` longest lines that lie on different infinite lines.
+
+    Two drawn segments of one model line (both penalty-area sides on the near side, say,
+    or a touchline split by a player) are collinear in the image and add no constraint
+    to a hypothesis, so a second one would only waste a candidate slot.
+    """
+    tol_px = max(2.0, 0.002 * width)
+    tol_ang = math.radians(1.5)
+    chosen: List[int] = []
+    for i, ln in enumerate(lines):  # sorted by length
+        dup = False
+        for j in chosen:
+            d_ang = abs(ln.angle - lines[j].angle)
+            d_ang = min(d_ang, math.pi - d_ang)
+            if d_ang < tol_ang and np.abs(ln.endpoints() @ lines[j].abc[:2] + lines[j].abc[2]).max() < tol_px:
+                dup = True
+                break
+        if not dup:
+            chosen.append(i)
+            if len(chosen) == k:
+                break
+    return chosen
+
+
 def search_homography(lines: Sequence[ImageLine], width: int, height: int, model: PitchModel = DEFAULT_PITCH,
                       tau_px: Optional[float] = None, tol_m: float = 2.0, top_k: int = 6, n_score: int = 10,
                       n_rescore: int = 64, chunk: int = 40000) -> Tuple[Optional[np.ndarray], List[LineMatch], float]:
@@ -664,10 +689,14 @@ def search_homography(lines: Sequence[ImageLine], width: int, height: int, model
     tau = tau_px if tau_px is not None else max(2.5, 0.006 * width)
     model_abc, intervals, mlines = _segment_intervals(model)
     model_kind = np.array([ln.kind == X_CONST for ln in mlines])
-    xs = [(i, ln.value) for i, ln in enumerate(mlines) if ln.kind == X_CONST]
-    ys = [(i, ln.value) for i, ln in enumerate(mlines) if ln.kind == Y_CONST]
-    k = min(top_k, len(lines))
-    cand = list(range(k))  # lines are sorted by length
+    # Each family sorted by its constant, so every model pair below has xa < xb and
+    # ya < yb: the model quad then has positive orientation, matching the positive image
+    # quads kept by _quad_orientation_ok. (Unsorted, any pair listed in descending order,
+    # such as the near touchline with a penalty-area side, could only ever be paired with
+    # a mirrored image quad, so its correct homography was never generated.)
+    xs = sorted(((i, ln.value) for i, ln in enumerate(mlines) if ln.kind == X_CONST), key=lambda t: t[1])
+    ys = sorted(((i, ln.value) for i, ln in enumerate(mlines) if ln.kind == Y_CONST), key=lambda t: t[1])
+    cand = _distinct_lines(lines, top_k, width)  # the longest lines, one per infinite line
     # image assignments: ordered pair A -> x_const, ordered pair B -> y_const (disjoint)
     img_assign = []
     for a in itertools.combinations(cand, 2):

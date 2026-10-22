@@ -228,9 +228,12 @@ diagnostics. To switch it off, use `setup(with_calibration=False)` in
 `colab/vision_worker.py` or `--no-calibration` in `colab/run_clips.py`. The
 probe times it as a `calib` stage. On the Mac CPU a global search takes 0.6 to
 0.84 s and a tracked frame 58 to 88 ms, about one minute of CPU per 750-frame
-1080p clip; the Colab VM timing has not been measured. Accuracy on real
-broadcast frames is not measured: every number so far comes from synthetic
-clips.
+1080p clip. On the Colab L4 VM (measured 2026-10-20) a tracked frame takes
+0.264 s, about 3.3 minutes per clip, which makes calibration the slowest stage
+there and puts a real clip at 4.5 to 5 minutes (49 clips: about four hours of
+L4 time). That run also exposed, and `a4a231c` fixed, a search bug that failed
+when players hid the markings. Accuracy on real broadcast frames is not
+measured: every number so far comes from synthetic clips.
 
 ## 9. Things the cloud session could not verify
 
