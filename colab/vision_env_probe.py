@@ -17,8 +17,10 @@ The synthetic rectangles are not people, so RF-DETR is expected to detect
 little or nothing on them; detection throughput does not depend on content, and
 the tracking, embedding and pose stages are timed on the clip's ground-truth
 boxes. Camera calibration (``FrameCalibrator``, classical line detection plus a
-homography search, CPU only) is timed on the same frames, with its foot-position
-error against the clip's true camera. The static camera makes the clip's frame-1
+homography search, CPU only) is timed on the same frames with its default frame
+stride and fitting every frame, with its foot-position error against the clip's
+true camera, and both ways back to back on a 150-frame 1080p pan
+(``calib_pan_ab``). The static camera makes the clip's frame-1
 pixel -> metre homography valid for every frame, so the CPU smoke pipeline is
 run twice and scored with GS-HOTA to close the loader -> pipeline -> metric loop:
 once with that known homography as the projector, once with the calibrator
@@ -147,37 +149,62 @@ def stage1(args: argparse.Namespace) -> int:
 # ----------------------------------------------------------------------------
 
 
-def measure_calibration(frames, gt_feet_px=None, gt_h_px2m=None) -> dict:
-    """Time a fresh ``FrameCalibrator`` over BGR ``frames`` in order.
+def measure_calibration(frames, gt_feet_px=None, gt_h_px2m=None, frame_stride=None) -> dict:
+    """Time a fresh ``FrameCalibrator`` over BGR ``frames`` in order, fed as the pipeline feeds
+    it: ``push`` per frame and ``flush`` at the end, so the frame stride applies
+    (``frame_stride=1`` fits every frame; ``None`` is the calibrator's default).
 
     ``fps`` / ``seconds`` cover every frame, including the first one (the global
     homography search, the slow step); ``first_frame_seconds`` and
-    ``later_frame_seconds_mean`` split it from the tracked frames. With
-    ``gt_feet_px`` (per frame, an (N, 2) array of ground-truth bottom-middle
-    pixels) and ``gt_h_px2m`` (per frame, the true pixel -> metre homography) the
-    result also holds the foot-position error in metres of the calibrated frames.
+    ``later_frame_seconds_mean`` split it from the rest, which is the clip-level cost per
+    frame. ``fit_call_seconds_mean`` is the mean of the later ``push`` calls that fitted a
+    frame (including the interpolation of the frames it closed), ``held_call_seconds_mean``
+    that of the calls that held a frame back; ``steady_frame_seconds`` combines them for one
+    fitted and ``frame_stride - 1`` held frames, the cost per frame on a long steady shot,
+    and ``clip_750_seconds_steady`` scales it to a 750-frame GSR clip. With ``gt_feet_px``
+    (per frame, an (N, 2) array of ground-truth bottom-middle pixels) and ``gt_h_px2m``
+    (per frame, the true pixel -> metre homography) the result also holds the
+    foot-position error in metres of the calibrated frames.
     """
     import numpy as np
 
     from varlab_vision.calibration import FrameCalibrator
     from varlab_vision.pipeline import HomographyProjector
 
-    cal = FrameCalibrator()
-    per_frame, results = [], []
+    cal = FrameCalibrator() if frame_stride is None else FrameCalibrator(frame_stride=frame_stride)
+    per_frame, results, held = [], [], []
     for f in frames:
         t0 = time.perf_counter()
-        results.append(cal.update(f))
+        out = cal.push(f)
         per_frame.append(time.perf_counter() - t0)
+        results.extend(out)
+        held.append(not out)
+    t0 = time.perf_counter()
+    results.extend(cal.flush())
+    if per_frame:
+        per_frame[-1] += time.perf_counter() - t0
+        held[-1] = False
     total = sum(per_frame)
     later = per_frame[1:]
+    fit_calls = [t for t, h in zip(later, held[1:]) if not h]
+    held_calls = [t for t, h in zip(later, held[1:]) if h]
     statuses = [r.status for r in results]
     fit = [r.fit_error_px for r in results if r.ok and r.fit_error_px == r.fit_error_px]
-    out = {"frames": len(per_frame), "fps": round(len(per_frame) / total, 2) if total > 0 else None,
+    out = {"frames": len(per_frame), "frame_stride": cal.frame_stride,
+           "fps": round(len(per_frame) / total, 2) if total > 0 else None,
            "seconds": round(total, 3),
            "first_frame_seconds": round(per_frame[0], 3) if per_frame else None,
-           "later_frame_seconds_mean": round(sum(later) / len(later), 3) if later else None,
+           "later_frame_seconds_mean": round(sum(later) / len(later), 4) if later else None,
+           "fit_call_seconds_mean": round(float(np.mean(fit_calls)), 4) if fit_calls else None,
+           "held_call_seconds_mean": round(float(np.mean(held_calls)), 4) if held_calls else None,
            "statuses": {k: statuses.count(k) for k in sorted(set(statuses))},
+           "replayed_frames": cal.n_replayed,
            "fit_error_px_mean": round(float(np.mean(fit)), 3) if fit else None}
+    if fit_calls:
+        k = cal.frame_stride
+        steady = (np.mean(fit_calls) + (k - 1) * (np.mean(held_calls) if held_calls else 0.0)) / k
+        out["steady_frame_seconds"] = round(float(steady), 4)
+        out["clip_750_seconds_steady"] = round(float(steady) * 750, 1)
     if gt_feet_px is not None and gt_h_px2m is not None:
         errs = []
         for res, pts, h in zip(results, gt_feet_px, gt_h_px2m):
@@ -187,6 +214,66 @@ def measure_calibration(frames, gt_feet_px=None, gt_h_px2m=None) -> dict:
         out["foot_error_m_mean"] = round(float(np.mean(errs)), 3) if errs else None
         out["foot_error_m_max"] = round(float(np.max(errs)), 3) if errs else None
     return out
+
+
+def calibration_pan_ab(work: Path, n_frames: int = 150, width: int = 1920, height: int = 1080, rounds: int = 2) -> dict:
+    """Back to back on one clip: every frame fitted (``update``) against the default frame stride
+    (``push`` / ``flush``), alternating ``rounds`` times on the same in-memory frames. The clip is the
+    one the Mac comparison used: a medium camera panning 0.5 m/frame over a rendered pitch, 4 px
+    markings, no players. Reports the per-frame mean over frames 2..N per round, the speed-up of the
+    medians, the stride's status counts and each mode's worst keypoint error against the true camera."""
+    import cv2
+    import numpy as np
+
+    from varlab_vision.calibration import FrameCalibrator
+    from varlab_vision.pitch_model import DEFAULT_PITCH
+    from varlab_vision.synthetic import medium_camera, render_synthetic_clip
+
+    root = work / "calib_pan"
+    shutil.rmtree(root, ignore_errors=True)
+    clip = render_synthetic_clip(root, n_frames=n_frames, width=width, height=height, seed=4,
+                                 camera=medium_camera(width, height, look_x=-40.0), pan_m_per_frame=0.5,
+                                 line_thickness=4)
+    frames = [cv2.imread(str(clip.image_dir / f"{i:06d}.jpg")) for i in range(1, n_frames + 1)]
+    _names, kp = DEFAULT_PITCH.keypoint_array()
+
+    def worst(results):
+        e = 0.0
+        for cam, r in zip(clip.cameras, results):
+            px, depth = cam.project(kp)
+            vis = (depth > 0) & (px[:, 0] >= 0) & (px[:, 0] < width) & (px[:, 1] >= 0) & (px[:, 1] < height)
+            e = max(e, float(np.linalg.norm(r.project(px[vis]) - kp[vis], axis=1).max()) if r.ok else float("inf"))
+        return round(e, 3)
+
+    def every():
+        fc, t, out = FrameCalibrator(), [], []
+        for f in frames:
+            t0 = time.perf_counter(); out.append(fc.update(f)); t.append(time.perf_counter() - t0)
+        return t, out
+
+    def strided():
+        fc, t, out = FrameCalibrator(), [], []
+        for f in frames:
+            t0 = time.perf_counter(); out += fc.push(f); t.append(time.perf_counter() - t0)
+        t0 = time.perf_counter(); out += fc.flush(); t[-1] += time.perf_counter() - t0
+        return t, out
+
+    A = {"every_frame": [], "stride": []}
+    last = {}
+    for _ in range(rounds):
+        for name, fn in (("every_frame", every), ("stride", strided)):
+            t, out = fn()
+            A[name].append(round(float(np.mean(t[1:])), 4))
+            last[name] = out
+    med = {k: float(np.median(v)) for k, v in A.items()}
+    st = [r.status for r in last["stride"]]
+    return {"frames": n_frames, "size": f"{width}x{height}", "pan_m_per_frame": 0.5, "rounds": rounds,
+            "frame_stride": FrameCalibrator().frame_stride,
+            "every_frame_seconds_per_frame": A["every_frame"], "stride_seconds_per_frame": A["stride"],
+            "speed_up": round(med["every_frame"] / med["stride"], 2),
+            "clip_750_seconds": {"every_frame": round(750 * med["every_frame"], 1), "stride": round(750 * med["stride"], 1)},
+            "stride_statuses": {k: st.count(k) for k in sorted(set(st))},
+            "worst_keypoint_error_m": {"every_frame": worst(last["every_frame"]), "stride": worst(last["stride"])}}
 
 
 def smoke_calibrated_run(clip, gt_df, out_path) -> tuple:
@@ -372,9 +459,17 @@ def stage2(args: argparse.Namespace) -> int:
         gt_feet = [np.array([[(b[0] + b[2]) / 2.0, b[3]] for b in gt_boxes[im.image_id]], float).reshape(-1, 2)
                    for im in gt.images]
         S["calib"] = measure_calibration(frames, gt_feet_px=gt_feet, gt_h_px2m=clip.homographies)
-        S["calib"]["note"] = "FrameCalibrator on the rendered markings; CPU only, independent of the GPU stages"
+        S["calib"]["note"] = ("FrameCalibrator on the rendered markings with its default frame stride, as the "
+                              "pipeline runs it; CPU only, independent of the GPU stages")
+        S["calib_every_frame"] = measure_calibration(frames, gt_feet_px=gt_feet, gt_h_px2m=clip.homographies,
+                                                     frame_stride=1)
     except Exception as e:  # noqa: BLE001  (do not lose the weights and GPU numbers over this)
         S["calib"] = {"error": f"{type(e).__name__}: {e}"}
+    try:
+        S["calib_pan_ab"] = calibration_pan_ab(work)
+        print("calib pan A/B", json.dumps(S["calib_pan_ab"]), flush=True)
+    except Exception as e:  # noqa: BLE001
+        S["calib_pan_ab"] = {"error": f"{type(e).__name__}: {e}"}
     R["stages"] = S
     print("stages", json.dumps(S), flush=True)
 

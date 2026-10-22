@@ -24,11 +24,13 @@ unknown keys in ``ObjectAnnotation.extra``.
 
 Pitch coordinates come from one of two sources: a static ``PitchProjector``
 (a known homography, used by the synthetic smoke test) or a per-frame
-``FrameCalibrator`` from ``calibration.py`` that finds the markings in every
-frame. With a calibrator each object also carries ``pitch_x`` / ``pitch_y``
-(metres, bottom-middle; null when the frame is uncalibrated), ``calib_error``
-(the frame's RMS line-fit error in pixels; null when unknown) and ``calib_status``
-in its extra keys, and every frame gets a ``camera`` annotation record
+``FrameCalibrator`` from ``calibration.py`` that finds the markings (fed through
+``push`` / ``flush``, so its frame stride applies: during steady tracking most
+frames are interpolated between fitted ones). With a calibrator each object also
+carries ``pitch_x`` / ``pitch_y`` (metres, bottom-middle; null when the frame is
+uncalibrated), ``calib_error`` (the frame's RMS line-fit error in pixels; null
+when unknown, which includes every interpolated frame) and ``calib_status``
+(``calibrated`` / ``tracked`` / ``interpolated`` / ``uncalibrated``) in its extra keys, and every frame gets a ``camera`` annotation record
 (``calibration``: homography and diagnostics). ``bbox_pitch`` is null on every
 frame without a calibration and on any box whose projection is not finite, so
 the JSON never contains NaN or Infinity. ``has_labeled_camera`` on the image
@@ -653,17 +655,27 @@ class VisionPipeline:
             timers["pose"].add(time.perf_counter() - t0, 1)
         return dets
 
-    def _calibrate(self, frame_bgr: np.ndarray) -> "CalibrationResult":
-        """One calibrator step. A frame the calibrator chokes on (a singular homography on a degenerate
-        view, say) is reported uncalibrated with the reason in ``note`` and the calibrator is reset,
-        rather than aborting a clip that has already cost minutes of detector time."""
+    def _calibrate(self, frame_bgr: Optional[np.ndarray]) -> List["CalibrationResult"]:
+        """One calibrator step: the results that became final with this frame, in frame order (none
+        while a ``FrameCalibrator`` holds the frame back, several when its held stretch closes; a
+        calibrator with only ``update`` gives one per frame). ``None`` flushes what is still held at
+        the end of the clip. When the calibrator chokes (a singular homography on a degenerate view,
+        say), this frame and every frame it was still holding are reported uncalibrated with the
+        reason in ``note`` and the calibrator is reset, rather than aborting a clip that has already
+        cost minutes of detector time."""
+        push = getattr(self.calibrator, "push", None)
+        held = int(getattr(self.calibrator, "n_pending", 0)) if push is not None else 0
         try:
-            return self.calibrator.update(frame_bgr)
+            if frame_bgr is None:
+                return self.calibrator.flush() if push is not None else []
+            return push(frame_bgr) if push is not None else [self.calibrator.update(frame_bgr)]
         except Exception as e:  # noqa: BLE001
             from .calibration import STATUS_UNCALIBRATED, CalibrationResult
 
             self.calibrator.reset()
-            return CalibrationResult(status=STATUS_UNCALIBRATED, note=f"calibrator raised {type(e).__name__}: {e}")
+            n = held + (frame_bgr is not None)
+            return [CalibrationResult(status=STATUS_UNCALIBRATED, note=f"calibrator raised {type(e).__name__}: {e}")
+                    for _ in range(n)]
 
     # -- whole clip ---------------------------------------------------------
     def run_clip(self, clip_dir: Path | str, out_path: Path | str, clip_name: Optional[str] = None,
@@ -696,7 +708,7 @@ class VisionPipeline:
             per_frame.append((fidx, w, h, dets))
             if self.calibrator is not None:
                 t0 = time.perf_counter()
-                calib.append(self._calibrate(frame))
+                calib.extend(self._calibrate(frame))
                 timers["calib"].add(time.perf_counter() - t0, 1)
             if self.embedder is not None and dets.tracker_id is not None and k % stride == 0:
                 for i in range(len(dets)):
@@ -709,6 +721,11 @@ class VisionPipeline:
                         lst.append((fidx, crop(frame, dets.xyxy[i]).copy(), cx))
             if progress is not None:
                 progress(k + 1, n)
+
+        if self.calibrator is not None:  # the frames the calibrator still holds back
+            t0 = time.perf_counter()
+            calib.extend(self._calibrate(None))
+            timers["calib"].add(time.perf_counter() - t0, 0)
 
         # Team assignment over the whole clip.
         team_of: Dict[int, str] = {}
@@ -822,13 +839,14 @@ def _calibration_summary(calib: Sequence[Optional["CalibrationResult"]]) -> Dict
     res = [r for r in calib if r is not None]
     if not res:
         return {}
-    ok = [r for r in res if r.ok]
+    ok = [r for r in res if r.ok and r.status != "interpolated"]  # the fitted frames: errors and inliers are theirs
     fit = [r.fit_error_px for r in ok if not math.isnan(r.fit_error_px)]
     rep = [r.reprojection_error_m for r in ok if not math.isnan(r.reprojection_error_m)]
     return {
         "frames": len(res),
         "calibrated": sum(1 for r in res if r.status == "calibrated"),
         "tracked": sum(1 for r in res if r.status == "tracked"),
+        "interpolated": sum(1 for r in res if r.status == "interpolated"),
         "uncalibrated": sum(1 for r in res if not r.ok),
         "shot_cuts": sum(1 for r in res if r.shot_cut),
         "fit_error_px_mean": (round(float(np.mean(fit)), 3) if fit else None),

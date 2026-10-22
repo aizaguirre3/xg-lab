@@ -181,8 +181,8 @@ def process_clip(clip: str, split: str = "valid", local_root: str | None = None,
     if delete_frames and not local_root:
         shutil.rmtree(clip_dir / (info.im_dir if info else "img1"), ignore_errors=True)
     cal = rep.get("calibration") or {}
-    cal_txt = (f", calibration {cal.get('calibrated', 0)}/{cal.get('tracked', 0)}/{cal.get('uncalibrated', 0)} "
-               "(calibrated/tracked/uncalibrated)") if cal else ""
+    cal_txt = (f", calibration {cal.get('calibrated', 0)}/{cal.get('tracked', 0)}/{cal.get('interpolated', 0)}/"
+               f"{cal.get('uncalibrated', 0)} (calibrated/tracked/interpolated/uncalibrated)") if cal else ""
     print(f"{clip}: {rep['frames']} frames, {rep['detections']} detections, {rep['tracks']} tracks, "
           f"{rep['wall_seconds']} s{cal_txt}", flush=True)
     return rep

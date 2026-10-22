@@ -87,7 +87,8 @@ def objects_frame(clip: GSRClip, labeled_only: bool = True) -> pd.DataFrame:
     Two optional columns come last and are read from ``ObjectAnnotation.extra``,
     where the vision pipeline puts them when it ran a per-frame calibrator:
     ``calib_error`` (the frame's RMS line-fit error in pixels; NaN when the key is
-    absent or null) and ``calib_status`` (``calibrated`` / ``tracked`` /
+    absent or null, and on interpolated frames, which have no fit of their own) and
+    ``calib_status`` (``calibrated`` / ``tracked`` / ``interpolated`` /
     ``uncalibrated``; None when absent). Annotations that never went through a
     calibrator, such as the ground truth, have NaN / None in both.
     """
@@ -134,7 +135,8 @@ def camera_frame(clip: GSRClip) -> pd.DataFrame:
     """One row per camera record (``supercategory == "camera"``), ordered by frame.
 
     Columns: ``frame`` (1-based index of the image the record belongs to),
-    ``image_id``, ``status`` (``calibrated`` / ``tracked`` / ``uncalibrated``),
+    ``image_id``, ``status`` (``calibrated`` / ``tracked`` / ``interpolated`` /
+    ``uncalibrated``; an interpolated frame has 0 inliers and NaN errors),
     ``n_inliers`` (markings matched to the pitch model), ``fit_error_px``,
     ``reprojection_error_m`` (NaN when null) and ``shot_cut``. These are the
     diagnostics under the record's ``calibration`` key, which the vision pipeline
