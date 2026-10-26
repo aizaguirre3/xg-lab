@@ -543,3 +543,45 @@ def test_runner_passes_the_calibration_switch_to_setup(capsys, tmp_path: Path):
     assert "with_calibration=True" in capsys.readouterr().out
     assert runner.main(base + ["--no-calibration"]) == 0
     assert "with_calibration=False" in capsys.readouterr().out
+
+
+def test_worker_reads_a_clip_out_of_the_split_zip(tmp_path: Path, monkeypatch):
+    """hf_layout="zip": the clip is range-read out of <split>.zip (opened once per split), processed,
+    and its frames deleted afterwards. The "remote" zip is in memory, in the SN-GSR-2025 layout."""
+    import io
+    import zipfile
+
+    import varlab_vision.remote_zip as rz
+
+    worker = _load_colab("vision_worker")
+    clip = render_synthetic_clip(tmp_path / "src", n_frames=3, width=640, height=360, n_per_team=2,
+                                 with_referee=False, seed=0, name="SNGS-077")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("sequences_info.json", "{}")
+        for p in sorted(clip.clip_dir.rglob("*")):
+            if p.is_file():
+                zf.write(p, p.relative_to(clip.clip_dir.parent).as_posix())
+    data = buf.getvalue()
+    opened = []
+
+    def fake_open(url, token=None, **kw):
+        opened.append(url)
+        rf = rz.RangeFile(lambda s, e: data[s:e], len(data), block_size=4096)
+        return zipfile.ZipFile(rf), rf
+
+    monkeypatch.setattr(rz, "open_remote_zip", fake_open)
+    pipe = pl.smoke_pipeline(tracker=pl.GreedyIoUTracker())
+    monkeypatch.setattr(worker, "_STATE", {"pipeline": pipe, "head": "deadbeef", "with_calibration": False,
+                                           "hf_dataset": "SoccerNet/SN-GSR-2025", "hf_revision": "main",
+                                           "hf_layout": "zip"})
+    monkeypatch.setattr(worker, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr(worker, "OUT_DIR", tmp_path / "out")
+
+    rep = worker.process_clip("SNGS-077", split="valid")
+    assert opened == ["https://huggingface.co/datasets/SoccerNet/SN-GSR-2025/resolve/main/valid.zip"]
+    assert rep["frames"] == 3 and rep["download"]["mb"] > 0 and rep["download"]["seconds"] >= 0
+    assert (tmp_path / "out" / "valid" / "SNGS-077" / "Labels-GameState.json").is_file()
+    assert not (tmp_path / "data" / "valid" / "SNGS-077" / "img1").exists()  # frames removed after the run
+    worker.process_clip("SNGS-077", split="valid")
+    assert len(opened) == 1  # the split's zip directory is read once per kernel

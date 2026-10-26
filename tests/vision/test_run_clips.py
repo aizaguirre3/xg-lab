@@ -138,3 +138,30 @@ def test_dry_run_prints_commands_without_a_runner(capsys):
     captured = capsys.readouterr().out
     assert code == 0 and "colab new" in captured and "process_clip('A'" in captured and "colab stop" in captured
     assert "colab install" in captured and "colab restart-kernel" in captured
+
+
+def test_all_lists_the_clips_from_the_dataset_zip_and_passes_the_layout(tmp_path: Path, monkeypatch):
+    rc = load_module("run_clips")
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    seen = []
+    monkeypatch.setattr(rc, "list_dataset_clips", lambda ds, split, rev: seen.append((ds, split, rev)) or
+                        ["SNGS-021", "SNGS-022"])
+    fake = FakeColab(tmp_path)
+    args = rc.parse_args(["--all", "--ref", "abc123", "--out", str(tmp_path / "out")])
+    assert rc.run(args, runner=fake) == 0
+    assert seen == [("SoccerNet/SN-GSR-2025", "valid", "main")]
+    execs = [s for c, s in fake.calls if c[1] == "exec" and s]
+    assert any("setup(" in s and "hf_layout='zip'" in s for s in execs)
+    assert [s for s in execs if "process_clip(" in s] == [
+        "process_clip('SNGS-021', split='valid')", "process_clip('SNGS-022', split='valid')"]
+
+
+def test_all_and_clips_are_exclusive_and_all_needs_the_zip_layout(tmp_path: Path):
+    rc = load_module("run_clips")
+    with pytest.raises(SystemExit):
+        rc.parse_args(["--all", "--clips", "A", "--ref", "x", "--out", str(tmp_path)])
+    with pytest.raises(SystemExit):
+        rc.parse_args(["--ref", "x", "--out", str(tmp_path)])  # one of the two is required
+    args = rc.parse_args(["--all", "--hf-layout", "folders", "--ref", "x", "--out", str(tmp_path)])
+    with pytest.raises(SystemExit):
+        rc.run(args, runner=FakeColab(tmp_path))
