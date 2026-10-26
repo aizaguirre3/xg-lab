@@ -25,7 +25,10 @@ PnLCalib (GPL-2) or TrackLab / sn-gamestate (GPL-3). The chain is
    to the global search when tracking has too few correspondences or keeps clearly fewer
    inliers than the last frame (a false lock). A tracked fit goes through an alpha-beta
    (constant-velocity) filter on the eight homography parameters, so a steady pan is
-   followed without lag while fit noise is averaged on a static shot.
+   followed without lag while fit noise is averaged on a static shot. With ``push`` /
+   ``flush`` a frame stride applies: during steady tracking only about one frame in six is
+   fitted and the frames between are interpolated between fits (status ``interpolated``),
+   each one checked against its own markings (see ``DEFAULT_FRAME_STRIDE``).
 
 A frame is **calibrated** only when at least ``min_inliers`` lines match with at
 least two from each family (otherwise the homography is unconstrained along one
@@ -57,6 +60,7 @@ from .pitch_model import DEFAULT_PITCH, X_CONST, Y_CONST, ModelLine, PitchModel
 
 STATUS_CALIBRATED = "calibrated"
 STATUS_TRACKED = "tracked"
+STATUS_INTERPOLATED = "interpolated"  # held back by the frame stride: interpolated between fits, no line fit
 STATUS_UNCALIBRATED = "uncalibrated"
 
 
@@ -117,7 +121,7 @@ class CalibrationResult:
 
     @property
     def ok(self) -> bool:
-        return self.status in (STATUS_CALIBRATED, STATUS_TRACKED) and self.h_px2m is not None
+        return self.status in (STATUS_CALIBRATED, STATUS_TRACKED, STATUS_INTERPOLATED) and self.h_px2m is not None
 
     @property
     def n_inliers(self) -> int:
@@ -1018,28 +1022,139 @@ def homography_shift_px(h_a_m2px: np.ndarray, h_b_m2px: np.ndarray, width: int, 
     return float(d) if np.isfinite(d) else float("inf")
 
 
+# Frame stride. During steady tracking only one frame in up to ``frame_stride`` is fitted to
+# the markings; the frames between are held back and, once the next fit is in, interpolated
+# between the fits. Measured back to back on the Mac (Apple M5) on a 150-frame 1920x1080 pan,
+# fitting every frame costs 82 ms per frame, nearly all of it line extraction; a held-back
+# frame costs about 1.5 ms (the shot signature and the alignment check below), so a stride of
+# 6 brings the clip to 17 ms per frame (on the Colab L4 VM's CPU: 0.27 s to 0.056 s). Interpolation, not extrapolation: the image motion of
+# a panning camera is not linear in the homography, so even with the exact velocity a
+# constant-velocity prediction is 0.5 px off after two frames and 1.1 px after three on a
+# 0.8 m/frame pan (1080p), and a broadcast pan also accelerates. A quadratic through the fit
+# before the stretch, the fit that opens it and the fit that closes it follows both: on 0.8
+# and 2 m/frame pans at 1080p the interpolated frames were no less accurate than the fitted
+# ones (0.077 m worst against 0.105 m). What decides that a frame may be interpolated:
+#   * the shot-cut test still runs on every frame; a cut closes the open stretch with a fit of
+#     its last frame and then starts the new shot with a global search;
+#   * frames are held back only after ``steady_frames`` one-frame tracked fits in a row whose
+#     innovation (``last_shift_px``) is within ``hold_tol_px``, and the stretch grows by one
+#     frame after each stretch that closed cleanly, up to ``frame_stride - 1`` held frames;
+#   * the fit that closes a stretch must be tracked and land within ``close_tol_px`` of the
+#     prediction it was tracked from; otherwise the state is rewound to the opening fit and
+#     the held frames are fitted one by one, exactly as ``update`` would have done;
+#   * every interpolated frame is checked against its own markings with
+#     :func:`marking_alignment`: its median offset may exceed that of the two fits around it
+#     by at most ``align_tol_px`` and its share of usable samples must be at least
+#     ``support_keep`` times theirs, or the frame is fitted after all. On rendered 1080p
+#     frames the median offset is 0.03 to 0.05 px for the true homography and 0.13 px for one
+#     0.37 px off.
+# Any failure drops back to fitting every frame until the camera is steady again. Measured on
+# rendered 1080p clips (steady, fast, accelerating and oscillating pans, start-stop, a whip, a
+# zoom, camera shake): no frame was less accurate than when fitting every frame, and on the
+# moving cameras the stride falls back to about the cost of fitting every frame.
+DEFAULT_FRAME_STRIDE = 6
+
+
+def marking_samples(model: PitchModel = DEFAULT_PITCH, step_m: float = 0.5) -> Tuple[np.ndarray, np.ndarray]:
+    """Points every ``step_m`` metres along the drawn straight markings, (S, 2), and the index
+    of each one's model line in ``model.lines()``, (S,)."""
+    pts, idx = [], []
+    for i, ln in enumerate(model.lines()):
+        for p0, p1 in ln.segments:
+            a, b = np.asarray(p0, float), np.asarray(p1, float)
+            n = max(2, int(math.ceil(np.linalg.norm(b - a) / step_m)) + 1)
+            pts.append(np.linspace(a, b, n))
+            idx.append(np.full(n, i))
+    return np.concatenate(pts, axis=0), np.concatenate(idx)
+
+
+def marking_alignment(frame_bgr: np.ndarray, h_m2px: np.ndarray, samples: np.ndarray, sample_line: np.ndarray,
+                      model_abc: np.ndarray, half_window_px: int = 5, min_contrast: float = 30.0) -> Tuple[float, float, int]:
+    """How well ``h_m2px`` lines up with the frame's markings, without extracting them.
+
+    At every marking sample in view the brightness profile across the projected line
+    (``2 * half_window_px + 1`` pixels along its normal; the minimum colour channel, as in
+    :func:`line_weights`, minus the profile's own minimum) is reduced to its centroid, the
+    signed offset of the stroke from where the homography puts it. A sample is usable when
+    the profile has ``min_contrast`` and its peak is not at either end (a player, or a
+    stroke outside the window). Returns ``(median |offset| px over usable samples, usable
+    share of the samples in view, samples in view)``; the median is NaN with fewer than 20
+    usable samples. A few thousand pixel reads, against a full mask and line fit.
+    """
+    h, w = frame_bgr.shape[:2]
+    m_px = half_window_px + 1
+    hom = np.concatenate([samples, np.ones((len(samples), 1))], axis=1) @ np.asarray(h_m2px, float).T
+    with np.errstate(divide="ignore", invalid="ignore"):
+        px = hom[:, :2] / hom[:, 2:3]
+        vis = ((hom[:, 2] * np.sign(h_m2px[2, 2]) > 0) & np.isfinite(px).all(axis=1)
+               & (px[:, 0] >= m_px) & (px[:, 0] <= w - 1 - m_px) & (px[:, 1] >= m_px) & (px[:, 1] <= h - 1 - m_px))
+    n_vis = int(vis.sum())
+    if n_vis < 20:
+        return float("nan"), 0.0, n_vis
+    try:
+        l_px = project_model_lines(np.linalg.inv(h_m2px), model_abc)
+    except np.linalg.LinAlgError:
+        return float("nan"), 0.0, n_vis
+    nrm = l_px[sample_line[vis], :2]
+    p = px[vis]
+    offs = np.arange(-half_window_px, half_window_px + 1, dtype=float)
+    q = np.rint(p[:, None, :] + offs[None, :, None] * nrm[:, None, :]).astype(np.int64)  # (S, taps, 2)
+    d = ((q - p[:, None, :]) * nrm[:, None, :]).sum(axis=-1)  # signed distance of each tap from the line
+    m = frame_bgr[q[..., 1], q[..., 0]].min(axis=-1).astype(np.float32)
+    wgt = m - m.min(axis=1, keepdims=True)
+    peak = wgt.argmax(axis=1)
+    usable = (wgt.max(axis=1) >= min_contrast) & (peak > 0) & (peak < len(offs) - 1)
+    if int(usable.sum()) < 20:
+        return float("nan"), float(usable.mean()), n_vis
+    off = (wgt[usable] * d[usable]).sum(axis=1) / np.maximum(wgt[usable].sum(axis=1), 1e-6)
+    return float(np.median(np.abs(off))), float(usable.mean()), n_vis
+
+
+# what a rewind restores (see FrameCalibrator._close_with)
+_TRACK_STATE = ("_prior", "_p", "_v", "_n_inliers", "_missed", "_fit_no", "_steady", "last_shift_px")
+
+
 class FrameCalibrator:
-    """Stateful per-frame calibration with tracking, filtering and shot-cut resets.
+    """Stateful per-frame calibration with tracking, filtering, shot-cut resets and a frame stride.
 
-    ``update(frame)`` returns a :class:`CalibrationResult` whose ``project`` maps
-    pixels to metres (NaN when uncalibrated). ``name`` lets the pipeline report it
-    as its projector backend.
+    Two ways to feed it a clip's frames, in order:
 
-    Per frame: the shot-cut test (grey difference ``>= cut_threshold`` or HS histogram
+    * ``update(frame)`` returns that frame's :class:`CalibrationResult` and fits every frame;
+    * ``push(frame)`` applies the frame stride and returns the results that became final,
+      in frame order: none while a frame is held back, several when a stretch closes;
+      ``flush()`` at the end of the clip returns the rest, so every frame gets exactly one
+      result. Held-back frames are kept by reference (at most ``frame_stride - 1`` of them)
+      until their stretch closes, so they must not be modified in place.
+
+    A result's ``project`` maps pixels to metres (NaN when uncalibrated). ``name`` lets
+    the pipeline report it as its projector backend.
+
+    Per fitted frame: the shot-cut test (grey difference ``>= cut_threshold`` or HS histogram
     distance ``>= hist_threshold``; ``cut_threshold >= 255`` switches the test off) clears
-    the state; the frame is tracked from the filter's one-step prediction (falling back to
-    the previous solution, then to the global search); a tracked fit is passed through the
-    alpha-beta filter (``smoothing`` is alpha, 0 or 1 turns the filter off) unless it
-    disagrees with the prediction by more than ``guard_px`` at the anchor pixels, which
-    means the camera did something other than continue its motion and the new fit is
-    trusted as it is.
+    the state; the frame is tracked from the filter's prediction (falling back to the
+    previous solution, then to the global search); a tracked fit of the frame right after
+    the last one is passed through the alpha-beta filter (``smoothing`` is alpha, 0 or 1
+    turns the filter off) unless it disagrees with the prediction by more than ``guard_px``
+    at the anchor pixels, which means the camera did something other than continue its
+    motion and the new fit is trusted as it is.
+
+    Frame stride (``push`` only; the rules are in the comment above ``DEFAULT_FRAME_STRIDE``):
+    once tracking is steady (``steady_frames``, ``hold_tol_px``, default ``0.0016 * width``),
+    up to ``frame_stride - 1`` frames are held back between fits and then interpolated
+    (status ``interpolated``, no fit error, no inliers) if the closing fit is clean
+    (``close_tol_px``, default the matching tolerance) and each frame passes
+    :func:`marking_alignment` (``align_tol_px``, ``support_keep``); otherwise they are fitted.
+    ``n_replayed`` counts the held frames that had to be fitted. ``frame_stride=1`` makes
+    ``push`` fit every frame.
     """
 
     name = "line-calibration"
 
     def __init__(self, model: PitchModel = DEFAULT_PITCH, cut_threshold: float = CUT_GREY_THRESHOLD, smoothing: float = 0.6,
                  hold_frames: int = 5, min_inliers: int = 4, hist_threshold: float = CUT_HIST_THRESHOLD,
-                 guard_px: Optional[float] = None, track_keep: float = 0.6, **calibrate_kw):
+                 guard_px: Optional[float] = None, track_keep: float = 0.6, frame_stride: int = DEFAULT_FRAME_STRIDE,
+                 steady_frames: int = 2, hold_tol_px: Optional[float] = None, close_tol_px: Optional[float] = None,
+                 align_tol_px: float = 0.05, support_keep: float = 0.8, **calibrate_kw):
         self.model = model
         self.cut_threshold = cut_threshold
         self.hist_threshold = hist_threshold
@@ -1048,44 +1163,77 @@ class FrameCalibrator:
         self.min_inliers = min_inliers
         self.guard_px = guard_px
         self.track_keep = track_keep
+        self.frame_stride = max(1, int(frame_stride))
+        self.steady_frames = steady_frames
+        self.hold_tol_px = hold_tol_px
+        self.close_tol_px = close_tol_px
+        self.align_tol_px = align_tol_px
+        self.support_keep = support_keep
         self.calibrate_kw = calibrate_kw
+        self._samples, self._sample_line = marking_samples(model)
+        self._model_abc = np.stack([ln.homogeneous for ln in model.lines()], axis=0)
         self.reset()
 
     def reset(self) -> None:
         self._prior: Optional[np.ndarray] = None  # last output homography (metres -> pixels)
-        self._p: Optional[np.ndarray] = None  # its filtered parameters
+        self._p: Optional[np.ndarray] = None  # filtered parameters of the last fitted frame
         self._v: Optional[np.ndarray] = None  # per-frame velocity of the parameters
         self._prev_sig: Optional[ShotSignature] = None
         self._size: Optional[Tuple[int, int]] = None  # (width, height) of the frames so far
         self._n_inliers = 0  # inliers of the last solved frame
         self._missed = 0
+        self._frame_no = 0  # frames seen since the reset
+        self._fit_no = 0  # frame number of the last fitted frame
+        # recent fits of this shot, the interpolation nodes: (frame number, fitted parameters before the
+        # alpha-beta filter, so that an accelerating pan does not drag the filter's lag into them,
+        # alignment median px, usable share)
+        self._fits: List[Tuple[int, np.ndarray, float, float]] = []
+        self._pending: List[Tuple[int, np.ndarray]] = []  # held-back frames: (frame number, image)
+        self._steady = 0  # one-frame tracked fits in a row that continued the filter's motion (within hold_tol_px)
+        self._hold_max = 1  # frames the next stretch may hold back: grows after each clean stretch, up to frame_stride - 1
+        self._snapshot: Optional[dict] = None  # tracking state at the fit that opened the held stretch
         self.history: List[str] = []
         self.last_shot_change: Tuple[float, float] = (0.0, 0.0)
         self.last_shift_px: float = float("nan")
+        self.last_prior_shift_px: float = float("nan")  # distance of the last fit from the prior it was tracked from
+        self.n_replayed = 0  # held frames refitted one by one because their stretch did not close cleanly
+
+    @property
+    def n_pending(self) -> int:
+        """Frames pushed whose results ``push`` has not returned yet."""
+        return len(self._pending)
 
     def _drop_track(self) -> None:
         self._prior = None
         self._p = None
         self._v = None
         self._n_inliers = 0
+        self._fits = []
+        self._steady = 0
+        self._hold_max = 1
 
-    def _priors(self, width: int, height: int) -> Tuple[Optional[np.ndarray], List[np.ndarray]]:
+    def _priors(self, width: int, height: int, dt: int = 1) -> Tuple[Optional[np.ndarray], List[np.ndarray]]:
         if self._p is None:
             return None, []
         h_prev = _params_to_h(self._p, width, height, self.model)
         if self._v is None:
             return h_prev, []
-        return _params_to_h(self._p + self._v, width, height, self.model), [h_prev]
+        return _params_to_h(self._p + dt * self._v, width, height, self.model), [h_prev]
 
-    def _filter(self, res: CalibrationResult, width: int, height: int) -> None:
-        """Replace the fit in ``res`` by the filtered homography and update the filter state."""
+    def _filter(self, res: CalibrationResult, width: int, height: int, dt: int = 1) -> None:
+        """Replace the fit in ``res`` by the filtered homography and update the filter state.
+
+        ``dt`` is the number of frames since the last fit (1 unless frames were held back).
+        Over a held-back stretch a constant-velocity prediction is off by a pixel or more on
+        a smooth pan, so such a fit is taken as it is and only restarts the velocity.
+        """
         p_raw = _h_to_params(res.h_m2px, width, height, self.model)
         alpha = self.smoothing
         have_prev = self._p is not None
-        active = 0.0 < alpha < 1.0 and res.status == STATUS_TRACKED and have_prev
+        active = 0.0 < alpha < 1.0 and res.status == STATUS_TRACKED and have_prev and dt == 1
         p_new, v_new = p_raw, None
-        if have_prev and not active:  # a fresh global search right after a solved frame: learn the motion from the pair
-            v_new = p_raw - self._p
+        if have_prev and not active:  # a fresh global search right after a solved frame, or a stretch: learn the motion
+            v_new = (p_raw - self._p) / dt
         if active and self._v is not None:
             p_pred = self._p + self._v
             self.last_shift_px = homography_shift_px(_params_to_h(p_pred, width, height, self.model), res.h_m2px, width, height)
@@ -1112,36 +1260,184 @@ class FrameCalibrator:
         self._p, self._v = p_new, v_new
         self._prior = res.h_m2px
 
-    def update(self, frame_bgr: np.ndarray) -> CalibrationResult:
-        h, w = frame_bgr.shape[:2]
-        if self._size is not None and self._size != (w, h):  # a different video: nothing carries over
-            self.reset()
-        self._size = (w, h)
+    def _alignment(self, frame_bgr: np.ndarray, h_m2px: np.ndarray) -> Tuple[float, float]:
+        med, usable, _n = marking_alignment(frame_bgr, h_m2px, self._samples, self._sample_line, self._model_abc)
+        return med, usable
+
+    def _cut_test(self, frame_bgr: np.ndarray) -> bool:
         sig = shot_signature(frame_bgr)
         cut = False
         if self._prev_sig is not None and self.cut_threshold < 255:
             self.last_shot_change = shot_change(self._prev_sig, sig)
             cut = self.last_shot_change[0] >= self.cut_threshold or self.last_shot_change[1] >= self.hist_threshold
         self._prev_sig = sig
-        if cut:
-            self._drop_track()
-            self._missed = 0
-        prior, extra = self._priors(w, h)
+        return cut
+
+    def _fit(self, frame_bgr: np.ndarray, cut: bool) -> CalibrationResult:
+        """Line fit of frame number ``self._frame_no``, updating the tracking state."""
+        h, w = frame_bgr.shape[:2]
+        dt = max(1, self._frame_no - self._fit_no)
+        prior, extra = self._priors(w, h, dt)
         floor = max(self.min_inliers, int(math.ceil(self.track_keep * self._n_inliers))) if prior is not None else 0
         res = calibrate_frame(frame_bgr, self.model, prior_m2px=prior, extra_priors=extra, min_inliers=self.min_inliers,
                               min_tracked_inliers=floor, **self.calibrate_kw)
         res.shot_cut = bool(cut)
+        self.last_prior_shift_px = (homography_shift_px(prior, res.h_m2px, w, h) if res.ok and prior is not None
+                                    else float("nan"))
         if res.ok:
-            self._filter(res, w, h)
+            p_raw = _h_to_params(res.h_m2px, w, h, self.model)
+            self.last_shift_px = float("nan")
+            self._filter(res, w, h, dt)
+            hold_tol = self.hold_tol_px if self.hold_tol_px is not None else 0.0016 * w
+            if dt == 1:
+                self._steady = self._steady + 1 if (res.status == STATUS_TRACKED and self.last_shift_px <= hold_tol) else 0
+                if self._steady == 0:
+                    self._hold_max = 1
+            med, usable = self._alignment(frame_bgr, res.h_m2px) if self.frame_stride > 1 else (float("nan"), 0.0)
+            self._fits = (self._fits + [(self._frame_no, p_raw, med, usable)])[-3:]
             self._n_inliers = res.n_inliers
             self._missed = 0
         else:
             self._missed += 1
             self._v = None  # a velocity from before a gap says nothing about after it
+            self._fits = []
+            self._steady = 0
             if self._missed > self.hold_frames:
                 self._drop_track()
+        self._fit_no = self._frame_no
         self.history.append(res.status)
         return res
+
+    def _may_hold(self) -> bool:
+        return (self.frame_stride > 1 and self._steady >= self.steady_frames and self._p is not None
+                and len(self._fits) >= 2 and len(self._pending) < min(self._hold_max, self.frame_stride - 1))
+
+    def _interpolated(self, frame_no: int, width: int, height: int) -> np.ndarray:
+        """Homography (metres -> pixels) at ``frame_no`` from the last three fits (two if that is
+        all there is): Lagrange interpolation of the parameters, quadratic so that it follows a
+        pan's curvature and acceleration."""
+        p = np.zeros(8)
+        for i, (ti, pi, _m, _u) in enumerate(self._fits):
+            li = 1.0
+            for j, (tj, _pj, _mj, _uj) in enumerate(self._fits):
+                if j != i:
+                    li *= (frame_no - tj) / (ti - tj)
+            p = p + li * pi
+        return _params_to_h(p, width, height, self.model)
+
+    def _close_with(self, frame_bgr: np.ndarray, cut: bool) -> List[CalibrationResult]:
+        """Fit frame number ``self._frame_no`` and return the results of the held-back frames before it, then its own.
+
+        The stretch is interpolated only when this fit closes it cleanly: tracked, bracketed by
+        two fits of this shot and within ``close_tol_px`` (default: the matching tolerance,
+        ``0.006 * width``) of the prediction it was tracked from. Otherwise the camera did
+        something the stretch cannot vouch for (a whip pan, a zoom, a false lock from a stale
+        prior), and the tracking state is rewound to the fit that opened the stretch and every
+        held frame, then this one, is fitted in order, exactly as ``update`` would have.
+        """
+        res = self._fit(frame_bgr, cut)
+        if not self._pending:
+            self._snapshot = None
+            return [res]
+        w = frame_bgr.shape[1]
+        close_tol = self.close_tol_px if self.close_tol_px is not None else default_tau_px(w, self.calibrate_kw.get("tau_px"))
+        fits = self._fits
+        clean = (res.status == STATUS_TRACKED and len(fits) >= 2 and fits[-1][0] == self._frame_no
+                 and fits[-2][0] < self._pending[0][0] and self.last_prior_shift_px <= close_tol)
+        if clean:
+            return self._interpolate_stretch(res)
+        return self._replay(frame_bgr, cut)
+
+    def _replay(self, frame_bgr: np.ndarray, cut: bool) -> List[CalibrationResult]:
+        snap, pend, frame_no = self._snapshot, self._pending, self._frame_no
+        self._pending, self._snapshot = [], None
+        for k in _TRACK_STATE + ("_fits",):
+            setattr(self, k, snap[k])
+        del self.history[snap["_history_len"]:]
+        self.n_replayed += len(pend)
+        self._steady, self._hold_max = 0, 1
+        out: List[CalibrationResult] = []
+        for n, frame in pend:
+            self._frame_no = n
+            out.append(self._fit(frame, cut=False))
+        self._frame_no = frame_no
+        out.append(self._fit(frame_bgr, cut))
+        return out
+
+    def _interpolate_stretch(self, res: CalibrationResult) -> List[CalibrationResult]:
+        """Interpolated results for the held-back frames (each checked against its markings, and
+        fitted after all when the check fails), then ``res``, the fit that closed the stretch."""
+        pend, self._pending, self._snapshot = self._pending, [], None
+        h, w = pend[0][1].shape[:2]
+        (ta, _pa, ma, ua), (tb, _pb, mb, ub) = self._fits[-2], self._fits[-1]
+        out: List[CalibrationResult] = []
+        for n, frame in pend:
+            hm = self._interpolated(n, w, h)
+            med, usable = self._alignment(frame, hm)
+            if med <= max(ma, mb) + self.align_tol_px and usable >= self.support_keep * min(ua, ub):  # NaN fails
+                h_inv = np.linalg.inv(hm)
+                out.append(CalibrationResult(
+                    status=STATUS_INTERPOLATED, h_m2px=hm, h_px2m=h_inv / h_inv[2, 2],
+                    note=f"interpolated between the fits of frames {ta} and {tb}; marking offset {med:.2f} px"))
+                continue
+            # the interpolation does not line up with this frame's markings: fit it, starting from the interpolation
+            self._steady, self._hold_max = 0, 1
+            self.n_replayed += 1
+            floor = max(self.min_inliers, int(math.ceil(self.track_keep * self._n_inliers)))
+            out.append(calibrate_frame(frame, self.model, prior_m2px=hm, min_inliers=self.min_inliers,
+                                       min_tracked_inliers=floor, **self.calibrate_kw))
+        self.history[-1:-1] = [r.status for r in out]  # in frame order, before the closing fit
+        if all(r.status == STATUS_INTERPOLATED for r in out):
+            self._hold_max = min(self._hold_max + 1, self.frame_stride - 1)
+        return out + [res]
+
+    def _close_open_stretch(self) -> List[CalibrationResult]:
+        """Close the held stretch with a fit of its last frame (before a cut, a new clip or flush)."""
+        if not self._pending:
+            return []
+        n, frame = self._pending.pop()
+        frame_no, self._frame_no = self._frame_no, n
+        try:
+            return self._close_with(frame, cut=False)
+        finally:
+            self._frame_no = frame_no
+
+    def push(self, frame_bgr: np.ndarray) -> List[CalibrationResult]:
+        """Feed the next frame; returns the results that are final now, in frame order."""
+        h, w = frame_bgr.shape[:2]
+        out: List[CalibrationResult] = []
+        if self._size is not None and self._size != (w, h):  # a different video: nothing carries over
+            out += self.flush()
+            self.reset()
+        self._size = (w, h)
+        cut = self._cut_test(frame_bgr)
+        self._frame_no += 1
+        if cut:
+            out += self._close_open_stretch()
+            self._drop_track()
+            self._missed = 0
+        elif self._may_hold():
+            if not self._pending:
+                self._snapshot = {k: getattr(self, k) for k in _TRACK_STATE}
+                self._snapshot["_fits"] = list(self._fits)
+                self._snapshot["_history_len"] = len(self.history)
+            self._pending.append((self._frame_no, frame_bgr))
+            return out
+        return out + self._close_with(frame_bgr, cut)
+
+    def flush(self) -> List[CalibrationResult]:
+        """Results for the frames still held back (call once at the end of a clip)."""
+        return self._close_open_stretch()
+
+    def update(self, frame_bgr: np.ndarray) -> CalibrationResult:
+        """One frame in, its result out: fits every frame (the frame stride is ``push``'s)."""
+        if self._pending:
+            raise RuntimeError("frames pushed earlier are still held back: call flush() before update()")
+        stride, self.frame_stride = self.frame_stride, 1
+        try:
+            return self.push(frame_bgr)[-1]
+        finally:
+            self.frame_stride = stride
 
     # PitchProjector-compatible static use: project with the last good homography.
     def project(self, points_px: np.ndarray) -> np.ndarray:

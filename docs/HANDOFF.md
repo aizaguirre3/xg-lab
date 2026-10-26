@@ -219,7 +219,7 @@ It is classical and needs no weights. `production_pipeline` builds a
 `FrameCalibrator` by default. Each object then gets `pitch_x` and `pitch_y` in
 metres (bottom-middle of the box; null on an uncalibrated frame), `calib_error`
 (the frame's RMS line-fit error in pixels) and `calib_status` (`calibrated`,
-`tracked` or `uncalibrated`); `bbox_pitch` is null on uncalibrated frames. Each
+`tracked`, `interpolated` or `uncalibrated`); `bbox_pitch` is null on uncalibrated frames. Each
 frame gets a camera record whose `calibration` key holds the status, the
 homography and the line and inlier counts, and `has_labeled_camera` is true only
 on frames with a usable calibration (status `calibrated` or `tracked`). `loaders.objects_frame` exposes `calib_error` and
@@ -227,12 +227,33 @@ on frames with a usable calibration (status `calibrated` or `tracked`). `loaders
 diagnostics. To switch it off, use `setup(with_calibration=False)` in
 `colab/vision_worker.py` or `--no-calibration` in `colab/run_clips.py`. The
 probe times it as a `calib` stage. On the Mac CPU a global search takes 0.6 to
-0.84 s and a tracked frame 58 to 88 ms, about one minute of CPU per 750-frame
-1080p clip. On the Colab L4 VM (measured 2026-10-20) a tracked frame takes
-0.264 s, about 3.3 minutes per clip, which makes calibration the slowest stage
-there and puts a real clip at 4.5 to 5 minutes (49 clips: about four hours of
-L4 time). That run also exposed, and `a4a231c` fixed, a search bug that failed
-when players hid the markings. Accuracy on real broadcast frames is not
+0.84 s and a fitted frame about 82 ms. On the Colab L4 VM (measured 2026-10-20)
+a fitted frame takes 0.264 s, about 3.3 minutes per clip if every frame is
+fitted, which made calibration the slowest stage there and put a real clip at
+4.5 to 5 minutes (49 clips: about four hours of L4 time). That run also exposed,
+and `a4a231c` fixed, a search bug that failed when players hid the markings.
+
+Since 2026-10-22 the calibrator applies a frame stride. The pipeline feeds it
+through `FrameCalibrator.push` / `flush`. During steady tracking it fits about
+one frame in six and interpolates the rest (`calib_status` `interpolated`,
+`calib_error` null). The guards:
+- the shot-cut test runs on every frame;
+- a stretch is interpolated only when its closing fit is clean, otherwise it is
+  replayed frame by frame;
+- every interpolated frame is checked against its markings and fitted if it
+  does not line up.
+
+Measured back to back on the same 150-frame 1080p pan:
+- Mac: 82.1 ms to 17.1 ms per frame (4.8x).
+- Colab L4 VM (probe pinned to `1896146`): 0.269 s to 0.056 s (4.81x), a
+  750-frame clip from 202 s to 42 s.
+
+Accuracy is unchanged or better on the synthetic checks: clean sweep 0.042 m;
+stress test 240/240 with 0 wrong locks and worst 0.129 m. On accelerating,
+oscillating or shaky camera motion the stride falls back to about the cost of
+fitting every frame, so the gain on real clips depends on how steady the camera
+is. `FrameCalibrator(frame_stride=1)` or `update()` fits every frame. Full
+tables are in `analysis/vision_env.md`. Accuracy on real broadcast frames is not
 measured: every number so far comes from synthetic clips.
 
 ## 9. Things the cloud session could not verify

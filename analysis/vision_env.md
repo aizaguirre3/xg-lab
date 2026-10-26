@@ -135,14 +135,109 @@ On the VM the calibrator, not the GPU, is the slowest stage: about 3.3 minutes
 of CPU per 750-frame clip against about 16 s of detection. With pose, a real
 clip would take about 4.5 to 5 minutes instead of the 1.5 to 2 minutes
 estimated above, so the 49 validation clips need roughly four hours of L4
-time. Running the calibration on fewer frames, at lower resolution or in a
-separate process alongside the GPU stages are the obvious ways to win that
-back; none is implemented yet.
+time. The frame stride below (2026-10-22) brings a steady clip's calibration
+down to about 42 s.
 
 Stress test on the Mac after the fix: 24 occluded 1080p clips (60x140 and
 80x180 px players, 5 and 7 per team, wide and medium views, 240 frames), all
 240 frames calibrated or tracked, worst keypoint error 0.20 m; the merged code
 had 40 uncalibrated frames and 32 wrong locks over 1 m on the same clips.
+
+### Frame stride (added 2026-10-22)
+
+During steady tracking the calibrator now fits about one frame in six and
+interpolates the frames between (`FrameCalibrator.push` / `flush`, status
+`interpolated`; `update` still fits every frame and reproduces the earlier
+results exactly). The pipeline feeds the calibrator this way, so the stride is on
+by default. The rules are in `calibration.py` above `DEFAULT_FRAME_STRIDE`:
+- **Interpolation, not extrapolation.** The skipped frames are interpolated
+  quadratically through the last three fits. A constant-velocity prediction
+  drifts by a pixel within three frames on a smooth pan.
+- **Cuts.** The shot-cut test still runs on every frame. A cut closes the open
+  stretch before the new shot starts.
+- **Closing fit.** A stretch is interpolated only when its closing fit is
+  tracked and lands near its prediction. Otherwise it is rewound and fitted
+  frame by frame.
+- **Per-frame check.** Every interpolated frame must line up with its own
+  markings, checked by `marking_alignment`, a sub-pixel profile check that
+  reads a few thousand pixels. A frame that fails is fitted.
+- **Adaptive length.** The stretch length grows after clean stretches and drops
+  back to fitting every frame after any failure.
+
+Speed, back to back against main on the same frames (150-frame 1920x1080 pan,
+0.5 m/frame, mean per frame over frames 2-150):
+
+| Machine | every frame (main) | stride (default 6) | speed-up | 750-frame clip |
+|---|---|---|---|---|
+| Mac, Apple M5 (3 interleaved rounds) | 82.1 ms | 17.1 ms | 4.80x | 62 s -> 13 s |
+| Colab L4 VM, 12 vCPU (2 rounds, `calib_pan_ab` in the probe) | 0.269 s | 0.056 s | 4.81x | 202 s -> 42 s |
+
+A fitted frame costs what it did (0.27 s on the VM, 82 ms on the Mac); a held
+frame costs 2.8 ms on the VM. The gain is the share of frames that need no fit
+(120 of 150 on this pan).
+
+The probe ran on a fresh L4 on 2026-10-22, pinned to `1896146`
+(`colab run --gpu L4 --timeout 900 -s varlab-calib-stride colab/vision_env_probe.py --ref 18961460d267408119a0c25a1798ee1b1d4c73c2`;
+4 min 27 s wall clock including provisioning; `colab sessions` showed no
+session afterwards). On the probe's own 30-frame clip (static wide camera,
+60x140 px players):
+
+| Check | every frame | stride |
+|---|---|---|
+| Frames | 1 calibrated, 29 tracked | 1 calibrated, 9 tracked, 20 interpolated, 0 replayed |
+| Mean per frame after the first | 0.266 s | 0.086 s (includes the ramp-up of a short clip) |
+| Fitted / held frame | 0.266 s / - | 0.271 s / 0.0028 s |
+| Steady-state cost per 750-frame clip | 200 s | 36 s |
+| Foot-position error, mean / max | 0.021 / 0.092 m | 0.022 / 0.069 m |
+| Calibrated smoke GS-HOTA | 0.8837 all roles, 0.9231 players, LocA 0.9954 (unchanged) | |
+
+Accuracy on the Mac (synthetic clips, main against the stride):
+
+| Check | main | stride |
+|---|---|---|
+| Clean 24-scene sweep (6 camera positions x wide and medium x 720p and 1080p, 8 frames each), worst keypoint error on the global-search frame / over all frames | 0.042 / 0.067 m | 0.042 / 0.067 m (48 of 192 frames interpolated, worst 0.048 m on them) |
+| Occlusion stress test (24 occluded 1080p clips, 240 frames) | 240 good, 0 uncalibrated, 0 wrong locks over 1 m, worst 0.198 m | 240 good, 0 uncalibrated, 0 wrong locks, worst 0.129 m (72 frames interpolated, worst 0.041 m on them) |
+| 60-frame 1080p pan at 0.8 m/frame, worst keypoint error | 0.090 m | 0.025 m |
+
+Camera motion other than a steady pan (1080p frames rendered in memory with 14
+player boxes, 48 frames each, every frame fitted against the stride):
+
+| Motion | every frame: worst / ms per frame | stride: worst / ms per frame |
+|---|---|---|
+| steady pan, 0.8 m/frame | 0.075 m / 99 | 0.025 m / 35 |
+| fast pan, 2 m/frame | 0.106 m / 87 | 0.112 m / 66 |
+| accelerating pan (to 4.7 m/frame) | 0.062 m / 89 | 0.051 m / 87 |
+| start-stop | 0.133 m / 92 | 0.120 m / 81 |
+| whip, 20 m in two frames, no cut | 0.004 m / 102 | 0.004 m / 74 |
+| zoom, 58 to 38 degrees | 0.052 m / 87 | 0.051 m / 63 |
+| camera shake (medium) | 0.040 m / 98-102 | 0.040 m / 98-112 (never holds a frame) |
+| oscillating pan, +-2 m/frame | 0.093 m / 94 | 0.089 m / 93 |
+
+No scenario had a wrong lock or an uncalibrated frame. On accelerating,
+oscillating or shaky motion the stride falls back to fitting nearly every frame,
+at about main's cost. The gain on real footage therefore depends on how much of a
+clip the camera holds still or pans steadily. That share is unknown until
+SoccerNet clips are available, so the 42 s figure is the steady-camera case and
+3.3 minutes is the bound.
+
+Tried and rejected, measured on the same harness:
+- Line extraction on a half-resolution frame: 2.1x faster, but the clean sweep
+  went to 0.23 m and the stress test to 0.63 m.
+- The same with a full-resolution refit of every line: 1.4x faster, 0.07 m and
+  0.34 m.
+- Two refit passes per line instead of four: 1.35x faster, clean sweep 0.27 m.
+- Hough seeds from a half-resolution mask: 1.08x faster, and one frame went to
+  0.55 m.
+- A stride with constant-velocity extrapolation instead of interpolation:
+  interpolated frames up to 0.56 m off.
+
+Overlapping the calibration with the GPU stages was not built. It does not lower
+the CPU cost, and after the stride a steady clip's calibration (about 42 s) is
+shorter than its detection and pose.
+
+One more observation on the 150-frame pan: fitting every frame, frame 79 has a
+0.727 m keypoint error. It is a goal-area corner near the image edge, on main as
+on this branch. The stride happens to interpolate that frame.
 
 Not measured: accuracy on real broadcast frames (lens distortion, crowds,
 shadows, worn or partly hidden lines, close-ups showing fewer than four

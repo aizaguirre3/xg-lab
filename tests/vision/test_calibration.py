@@ -433,3 +433,161 @@ def test_distinct_lines_skips_collinear_segments():
     c = _image_line(h, (0.0, -34.0), (0.0, 34.0))
     assert cal._distinct_lines([a, b, c], 3, 1920) == [0, 2]
     assert cal._distinct_lines([a, b, c], 1, 1920) == [0]
+
+
+# ----------------------------------------------------------------------------
+# Frame stride: push / flush
+# ----------------------------------------------------------------------------
+
+
+def _push_all(fc, frames):
+    """Every frame through ``push`` then ``flush``; checks that each frame gets exactly one result."""
+    out = []
+    for f in frames:
+        out += fc.push(f)
+    out += fc.flush()
+    assert len(out) == len(frames) and fc.n_pending == 0
+    return out
+
+
+def test_frame_stride_interpolates_a_steady_pan_as_accurately_as_fitting_every_frame(tmp_path: Path):
+    """A 0.8 m/frame pan: with the default stride most frames are interpolated between fits, and no
+    frame is less accurate than when every frame is fitted. Measured at 1280x720: worst keypoint error
+    0.047 m fitting every frame, 0.021 m with the stride (8 of 24 frames fitted)."""
+    n = 24
+    clip = render_synthetic_clip(tmp_path, n_frames=n, width=W, height=H, seed=4, name="SYN-STRIDE",
+                                 camera=medium_camera(W, H, look_x=-30.0), pan_m_per_frame=0.8)
+    frames = [_frame(clip, i) for i in range(1, n + 1)]
+    fc1 = cal.FrameCalibrator()
+    every = [fc1.update(f) for f in frames]
+    fc = cal.FrameCalibrator()
+    assert fc.frame_stride == cal.DEFAULT_FRAME_STRIDE > 1
+    strided = _push_all(fc, frames)
+    statuses = [r.status for r in strided]
+    assert statuses[0] == cal.STATUS_CALIBRATED and statuses == fc.history
+    assert set(statuses[1:]) == {cal.STATUS_TRACKED, cal.STATUS_INTERPOLATED}
+    n_fit = sum(s != cal.STATUS_INTERPOLATED for s in statuses)
+    assert n_fit <= n // 2, statuses
+    worst_every = max(_accuracy(clip, r, i)[0].max() for i, r in enumerate(every, start=1))
+    worst_stride = max(_accuracy(clip, r, i)[0].max() for i, r in enumerate(strided, start=1))
+    assert worst_stride <= max(worst_every, 0.05) and worst_stride < 0.1, (worst_stride, worst_every)
+    for r in strided:
+        if r.status == cal.STATUS_INTERPOLATED:  # no fit of its own, reported as such
+            assert r.n_inliers == 0 and np.isnan(r.fit_error_px) and r.ok and "interpolated" in r.note
+            assert r.as_dict()["fit_error_px"] is None
+
+
+def test_push_with_stride_1_is_update(tmp_path: Path):
+    clip = render_synthetic_clip(tmp_path, n_frames=6, width=W, height=H, seed=4, name="SYN-S1",
+                                 camera=medium_camera(W, H, look_x=-20.0), pan_m_per_frame=0.8)
+    frames = [_frame(clip, i) for i in range(1, 7)]
+    fa = cal.FrameCalibrator()
+    a = [fa.update(f) for f in frames]
+    b = _push_all(cal.FrameCalibrator(frame_stride=1), frames)
+    assert [r.status for r in a] == [r.status for r in b]
+    assert all(np.allclose(x.h_m2px, y.h_m2px) for x, y in zip(a, b))
+
+
+def test_update_refuses_to_run_while_frames_are_held(tmp_path: Path):
+    clip = render_synthetic_clip(tmp_path, n_frames=6, width=W, height=H, seed=3, name="SYN-HELD")
+    fc = cal.FrameCalibrator()
+    for i in range(1, 6):  # frames 1-4 fitted, frame 5 held back
+        fc.push(_frame(clip, i))
+    assert fc.n_pending == 1
+    with pytest.raises(RuntimeError, match="flush"):
+        fc.update(_frame(clip, 6))
+    fc.flush()
+    assert fc.update(_frame(clip, 6)).ok
+
+
+def test_a_cut_inside_a_held_stretch_still_resets(tmp_path: Path):
+    """Static wide camera, then a cut to the medium camera on other grass while frames are held back.
+    The cut test runs on every frame, so the cut frame starts the new shot with a global search, the
+    held frames before it are resolved from the old camera's fits, and nothing straddles the cut."""
+    cut_at, n = 16, 20
+    clip = render_synthetic_clip(tmp_path, n_frames=n, width=W, height=H, seed=5, name="SYN-CUTHELD",
+                                 cut_at_frame=cut_at, green_after_cut=(60, 110, 30))
+    fc = cal.FrameCalibrator()
+    out = []
+    for i in range(1, n + 1):
+        if i == cut_at:
+            assert fc.n_pending >= 2, fc.history  # the cut lands inside a held stretch
+        out += fc.push(_frame(clip, i))
+    out += fc.flush()
+    assert len(out) == n
+    assert [r.shot_cut for r in out] == [i == cut_at for i in range(1, n + 1)]
+    assert out[cut_at - 1].status == cal.STATUS_CALIBRATED
+    assert out[cut_at - 3].status == cal.STATUS_INTERPOLATED  # held before the cut, resolved from the old shot
+    for i, r in enumerate(out, start=1):
+        kp_err, _ = _accuracy(clip, r, i)
+        assert r.ok and kp_err.max() < 0.2, (i, r.status, kp_err.max())
+
+
+def test_a_camera_switch_the_cut_test_misses_is_fitted_frame_by_frame(tmp_path: Path):
+    """The same switch with the pixel cut detector off, like a whip pan it cannot see: the fit that
+    would close the stretch is a fresh global search far from the prediction, so the stretch is rewound
+    and every held frame is fitted from the old track instead of interpolated across the switch."""
+    switch_at, n = 16, 20
+    clip = render_synthetic_clip(tmp_path, n_frames=n, width=W, height=H, seed=6, name="SYN-SWITCH",
+                                 cut_at_frame=switch_at)
+    fc = cal.FrameCalibrator(cut_threshold=1e9)
+    out = []
+    for i in range(1, n + 1):
+        if i == switch_at:
+            assert fc.n_pending >= 1, fc.history
+        out += fc.push(_frame(clip, i))
+    out += fc.flush()
+    assert len(out) == n and not any(r.shot_cut for r in out)
+    assert fc.n_replayed >= 1
+    for i, r in enumerate(out, start=1):
+        kp_err, _ = _accuracy(clip, r, i)
+        assert r.ok and kp_err.max() < 0.2, (i, r.status, kp_err.max())
+
+
+def test_a_new_frame_size_flushes_the_held_frames(tmp_path: Path, wide_clip):
+    clip = render_synthetic_clip(tmp_path, n_frames=8, width=W, height=H, seed=3, name="SYN-FLUSH")
+    small = render_synthetic_clip(tmp_path, n_frames=1, width=640, height=360, seed=9, name="SYN-SMALL2",
+                                  camera=medium_camera(640, 360))
+    fc = cal.FrameCalibrator()
+    out = []
+    for i in range(1, 9):
+        out += fc.push(_frame(clip, i))
+    held = fc.n_pending
+    assert held > 0
+    res = fc.push(_frame(small, 1))
+    assert len(res) == held + 1 and res[-1].status == cal.STATUS_CALIBRATED
+    assert len(out) + len(res) == 9 and fc.n_pending == 0
+    for i, r in enumerate(out + res[:-1], start=1):
+        assert r.ok and _accuracy(clip, r, i)[0].max() < 0.2
+
+
+def test_probe_clip_with_the_frame_stride(probe_clip):
+    """The Colab probe's clip (1080p, players over the markings) through push / flush: every frame
+    calibrated, most of them interpolated, worst keypoint error as with every frame fitted (0.12 m)."""
+    frames = [_frame(probe_clip, i) for i in range(1, 31)]
+    out = _push_all(cal.FrameCalibrator(), frames)
+    assert all(r.ok for r in out)
+    assert sum(r.status == cal.STATUS_INTERPOLATED for r in out) >= 15
+    worst = max(_accuracy(probe_clip, r, i)[0].max() for i, r in enumerate(out, start=1))
+    assert worst < 0.25, worst
+
+
+def test_marking_alignment_separates_a_good_homography_from_a_slightly_wrong_one(wide_clip):
+    frame = _frame(wide_clip, 1)
+    samples, line_idx = cal.marking_samples(DEFAULT_PITCH)
+    abc = np.stack([ln.homogeneous for ln in DEFAULT_PITCH.lines()], axis=0)
+    cam = wide_clip.cameras[0]
+
+    def read(c):
+        h = np.linalg.inv(c.homography_px2m())
+        return cal.marking_alignment(frame, h / h[2, 2], samples, line_idx, abc)
+
+    med0, use0, n0 = read(cam)
+    med1, use1, _ = read(cam.panned(0.1))  # about a third of a pixel at this resolution
+    med_far, use_far, _ = read(cam.panned(3.0))  # many pixels: the strokes leave the profile window
+    assert n0 > 200 and use0 > 0.6
+    assert med0 < 0.1 and med1 > med0 + 0.05, (med0, med1)
+    assert not (med_far <= med0 + 0.05 and use_far >= 0.8 * use0)  # the check the stride applies fails
+    grass = np.full_like(frame, (40, 150, 40))
+    med_g, use_g, _ = cal.marking_alignment(grass, np.linalg.inv(cam.homography_px2m()), samples, line_idx, abc)
+    assert np.isnan(med_g) and use_g == 0.0
