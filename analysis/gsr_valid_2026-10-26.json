@@ -1,0 +1,1415 @@
+{
+ "dataset": "SoccerNet/SN-GSR-2025 (Hugging Face, public; card licence gpl-3.0)",
+ "split": "valid",
+ "clips": 58,
+ "run": {
+  "date": "2026-10-26",
+  "repo_refs": [
+   "0b82a95",
+   "5aed155"
+  ],
+  "gpu": "Colab L4",
+  "backends": "RF-DETR Medium + ByteTrack + SigLIP/k-means teams; no pose, no calibration on Colab"
+ },
+ "tracking": {
+  "overall": {
+   "precision": 0.9456,
+   "recall": 0.8143,
+   "f1": 0.8751,
+   "mota": 0.7634,
+   "idf1": 0.6275,
+   "id_switches": 2867,
+   "gt_tracks": 1350,
+   "pred_tracks": 2957,
+   "recall_by_role": {
+    "player": 0.8382,
+    "goalkeeper": 0.6914,
+    "referee": 0.6267,
+    "other": 0.8747
+   },
+   "team_accuracy": 0.7352,
+   "ball_recall": 0.3462,
+   "ball_precision": 0.8861,
+   "detector_precision": 0.9428,
+   "detector_recall": 0.8328,
+   "untracked_boxes": 15697
+  },
+  "median_seconds_per_clip": {
+   "wall_s": 43.5,
+   "download_s": 14.7,
+   "download_mb": 234.9,
+   "read_s": 8.01,
+   "detect_s": 16.91,
+   "track_s": 1.28,
+   "team_s": 0.95,
+   "total_s": 27.9
+  },
+  "per_clip": {
+   "SNGS-021": {
+    "precision": 0.9152,
+    "recall": 0.8699,
+    "mota": 0.7861,
+    "idf1": 0.6591,
+    "team_accuracy": 0.7137,
+    "ball_recall": 0.3617,
+    "id_switches": 39,
+    "gt_tracks": 23,
+    "pred_tracks": 49
+   },
+   "SNGS-022": {
+    "precision": 0.96,
+    "recall": 0.8899,
+    "mota": 0.8479,
+    "idf1": 0.6892,
+    "team_accuracy": 0.5961,
+    "ball_recall": 0.3783,
+    "id_switches": 48,
+    "gt_tracks": 23,
+    "pred_tracks": 58
+   },
+   "SNGS-023": {
+    "precision": 0.9951,
+    "recall": 0.7368,
+    "mota": 0.729,
+    "idf1": 0.6419,
+    "team_accuracy": 0.9232,
+    "ball_recall": 0.8267,
+    "id_switches": 63,
+    "gt_tracks": 22,
+    "pred_tracks": 44
+   },
+   "SNGS-024": {
+    "precision": 0.9457,
+    "recall": 0.8824,
+    "mota": 0.8269,
+    "idf1": 0.6319,
+    "team_accuracy": 0.566,
+    "ball_recall": 0.3001,
+    "id_switches": 40,
+    "gt_tracks": 23,
+    "pred_tracks": 48
+   },
+   "SNGS-025": {
+    "precision": 0.9438,
+    "recall": 0.7508,
+    "mota": 0.7013,
+    "idf1": 0.5469,
+    "team_accuracy": 0.7404,
+    "ball_recall": 0.5121,
+    "id_switches": 61,
+    "gt_tracks": 23,
+    "pred_tracks": 55
+   },
+   "SNGS-026": {
+    "precision": 0.9655,
+    "recall": 0.9303,
+    "mota": 0.8946,
+    "idf1": 0.8249,
+    "team_accuracy": 0.8894,
+    "ball_recall": 0.404,
+    "id_switches": 21,
+    "gt_tracks": 24,
+    "pred_tracks": 40
+   },
+   "SNGS-027": {
+    "precision": 0.9594,
+    "recall": 0.6896,
+    "mota": 0.6502,
+    "idf1": 0.4577,
+    "team_accuracy": 0.591,
+    "ball_recall": 0.2709,
+    "id_switches": 126,
+    "gt_tracks": 21,
+    "pred_tracks": 60
+   },
+   "SNGS-028": {
+    "precision": 0.9708,
+    "recall": 0.9438,
+    "mota": 0.9104,
+    "idf1": 0.6611,
+    "team_accuracy": 0.855,
+    "ball_recall": 0.4087,
+    "id_switches": 40,
+    "gt_tracks": 23,
+    "pred_tracks": 38
+   },
+   "SNGS-029": {
+    "precision": 0.8819,
+    "recall": 0.8693,
+    "mota": 0.7487,
+    "idf1": 0.5826,
+    "team_accuracy": 0.5754,
+    "ball_recall": 0.6039,
+    "id_switches": 41,
+    "gt_tracks": 24,
+    "pred_tracks": 61
+   },
+   "SNGS-030": {
+    "precision": 0.981,
+    "recall": 0.7574,
+    "mota": 0.7379,
+    "idf1": 0.6032,
+    "team_accuracy": 0.9115,
+    "ball_recall": 0.2267,
+    "id_switches": 52,
+    "gt_tracks": 21,
+    "pred_tracks": 33
+   },
+   "SNGS-031": {
+    "precision": 0.9553,
+    "recall": 0.8297,
+    "mota": 0.7842,
+    "idf1": 0.5511,
+    "team_accuracy": 0.7924,
+    "ball_recall": 0.5642,
+    "id_switches": 75,
+    "gt_tracks": 24,
+    "pred_tracks": 84
+   },
+   "SNGS-032": {
+    "precision": 0.9237,
+    "recall": 0.8431,
+    "mota": 0.7685,
+    "idf1": 0.5508,
+    "team_accuracy": 0.5379,
+    "ball_recall": 0.514,
+    "id_switches": 50,
+    "gt_tracks": 24,
+    "pred_tracks": 59
+   },
+   "SNGS-033": {
+    "precision": 0.8674,
+    "recall": 0.8126,
+    "mota": 0.6846,
+    "idf1": 0.6335,
+    "team_accuracy": 0.5966,
+    "ball_recall": 0.1676,
+    "id_switches": 30,
+    "gt_tracks": 25,
+    "pred_tracks": 62
+   },
+   "SNGS-034": {
+    "precision": 0.9904,
+    "recall": 0.6805,
+    "mota": 0.666,
+    "idf1": 0.4048,
+    "team_accuracy": 0.9013,
+    "ball_recall": 0.392,
+    "id_switches": 112,
+    "gt_tracks": 21,
+    "pred_tracks": 59
+   },
+   "SNGS-035": {
+    "precision": 0.9498,
+    "recall": 0.851,
+    "mota": 0.8032,
+    "idf1": 0.6656,
+    "team_accuracy": 0.7739,
+    "ball_recall": 0.1903,
+    "id_switches": 34,
+    "gt_tracks": 24,
+    "pred_tracks": 54
+   },
+   "SNGS-036": {
+    "precision": 0.7971,
+    "recall": 0.6913,
+    "mota": 0.5144,
+    "idf1": 0.6677,
+    "team_accuracy": 0.5368,
+    "ball_recall": 0.2323,
+    "id_switches": 12,
+    "gt_tracks": 27,
+    "pred_tracks": 37
+   },
+   "SNGS-037": {
+    "precision": 0.9784,
+    "recall": 0.8803,
+    "mota": 0.8562,
+    "idf1": 0.6145,
+    "team_accuracy": 0.9142,
+    "ball_recall": 0.3199,
+    "id_switches": 46,
+    "gt_tracks": 23,
+    "pred_tracks": 48
+   },
+   "SNGS-038": {
+    "precision": 0.9854,
+    "recall": 0.7678,
+    "mota": 0.7517,
+    "idf1": 0.64,
+    "team_accuracy": 0.5938,
+    "ball_recall": 0.0869,
+    "id_switches": 50,
+    "gt_tracks": 16,
+    "pred_tracks": 37
+   },
+   "SNGS-039": {
+    "precision": 0.9587,
+    "recall": 0.8155,
+    "mota": 0.7758,
+    "idf1": 0.534,
+    "team_accuracy": 0.6186,
+    "ball_recall": 0.2145,
+    "id_switches": 69,
+    "gt_tracks": 23,
+    "pred_tracks": 53
+   },
+   "SNGS-040": {
+    "precision": 0.963,
+    "recall": 0.6403,
+    "mota": 0.6118,
+    "idf1": 0.5711,
+    "team_accuracy": 0.805,
+    "ball_recall": 0.1827,
+    "id_switches": 54,
+    "gt_tracks": 24,
+    "pred_tracks": 51
+   },
+   "SNGS-041": {
+    "precision": 0.9868,
+    "recall": 0.9155,
+    "mota": 0.9021,
+    "idf1": 0.8451,
+    "team_accuracy": 0.8158,
+    "ball_recall": 0.2081,
+    "id_switches": 13,
+    "gt_tracks": 23,
+    "pred_tracks": 32
+   },
+   "SNGS-042": {
+    "precision": 0.9865,
+    "recall": 0.6786,
+    "mota": 0.665,
+    "idf1": 0.5218,
+    "team_accuracy": 0.7929,
+    "ball_recall": 0.0898,
+    "id_switches": 61,
+    "gt_tracks": 24,
+    "pred_tracks": 57
+   },
+   "SNGS-043": {
+    "precision": 0.9533,
+    "recall": 0.8288,
+    "mota": 0.7835,
+    "idf1": 0.6664,
+    "team_accuracy": 0.7256,
+    "ball_recall": 0.107,
+    "id_switches": 59,
+    "gt_tracks": 24,
+    "pred_tracks": 50
+   },
+   "SNGS-044": {
+    "precision": 0.9684,
+    "recall": 0.8,
+    "mota": 0.7705,
+    "idf1": 0.657,
+    "team_accuracy": 0.6626,
+    "ball_recall": 0.4328,
+    "id_switches": 48,
+    "gt_tracks": 24,
+    "pred_tracks": 49
+   },
+   "SNGS-045": {
+    "precision": 0.9216,
+    "recall": 0.8573,
+    "mota": 0.7806,
+    "idf1": 0.5446,
+    "team_accuracy": 0.6948,
+    "ball_recall": 0.3892,
+    "id_switches": 45,
+    "gt_tracks": 25,
+    "pred_tracks": 56
+   },
+   "SNGS-046": {
+    "precision": 0.9518,
+    "recall": 0.8549,
+    "mota": 0.8079,
+    "idf1": 0.7362,
+    "team_accuracy": 0.5963,
+    "ball_recall": 0.2961,
+    "id_switches": 50,
+    "gt_tracks": 23,
+    "pred_tracks": 48
+   },
+   "SNGS-047": {
+    "precision": 0.9833,
+    "recall": 0.8713,
+    "mota": 0.853,
+    "idf1": 0.7515,
+    "team_accuracy": 0.6119,
+    "ball_recall": 0.1851,
+    "id_switches": 45,
+    "gt_tracks": 23,
+    "pred_tracks": 45
+   },
+   "SNGS-048": {
+    "precision": 0.9101,
+    "recall": 0.8636,
+    "mota": 0.7768,
+    "idf1": 0.7318,
+    "team_accuracy": 0.5711,
+    "ball_recall": 0.2911,
+    "id_switches": 22,
+    "gt_tracks": 24,
+    "pred_tracks": 39
+   },
+   "SNGS-049": {
+    "precision": 0.9628,
+    "recall": 0.8342,
+    "mota": 0.7998,
+    "idf1": 0.7261,
+    "team_accuracy": 0.7768,
+    "ball_recall": 0.1562,
+    "id_switches": 32,
+    "gt_tracks": 23,
+    "pred_tracks": 32
+   },
+   "SNGS-050": {
+    "precision": 0.9878,
+    "recall": 0.7309,
+    "mota": 0.7172,
+    "idf1": 0.5556,
+    "team_accuracy": 0.9656,
+    "ball_recall": 0.2,
+    "id_switches": 75,
+    "gt_tracks": 23,
+    "pred_tracks": 53
+   },
+   "SNGS-051": {
+    "precision": 0.9309,
+    "recall": 0.8,
+    "mota": 0.7375,
+    "idf1": 0.741,
+    "team_accuracy": 0.6062,
+    "ball_recall": 0.1059,
+    "id_switches": 36,
+    "gt_tracks": 23,
+    "pred_tracks": 43
+   },
+   "SNGS-052": {
+    "precision": 0.98,
+    "recall": 0.8556,
+    "mota": 0.8346,
+    "idf1": 0.6698,
+    "team_accuracy": 0.6561,
+    "ball_recall": 0.1427,
+    "id_switches": 48,
+    "gt_tracks": 24,
+    "pred_tracks": 46
+   },
+   "SNGS-053": {
+    "precision": 0.9383,
+    "recall": 0.8703,
+    "mota": 0.8116,
+    "idf1": 0.7747,
+    "team_accuracy": 0.7999,
+    "ball_recall": 0.2211,
+    "id_switches": 22,
+    "gt_tracks": 23,
+    "pred_tracks": 35
+   },
+   "SNGS-054": {
+    "precision": 0.9551,
+    "recall": 0.8705,
+    "mota": 0.8252,
+    "idf1": 0.6992,
+    "team_accuracy": 0.9683,
+    "ball_recall": 0.2787,
+    "id_switches": 49,
+    "gt_tracks": 25,
+    "pred_tracks": 43
+   },
+   "SNGS-055": {
+    "precision": 0.9651,
+    "recall": 0.8509,
+    "mota": 0.8141,
+    "idf1": 0.5438,
+    "team_accuracy": 0.7717,
+    "ball_recall": 0.186,
+    "id_switches": 69,
+    "gt_tracks": 22,
+    "pred_tracks": 52
+   },
+   "SNGS-056": {
+    "precision": 0.9933,
+    "recall": 0.9406,
+    "mota": 0.9322,
+    "idf1": 0.9082,
+    "team_accuracy": 0.9042,
+    "ball_recall": 0.0567,
+    "id_switches": 22,
+    "gt_tracks": 15,
+    "pred_tracks": 20
+   },
+   "SNGS-057": {
+    "precision": 0.9787,
+    "recall": 0.7261,
+    "mota": 0.7057,
+    "idf1": 0.5592,
+    "team_accuracy": 0.7105,
+    "ball_recall": 0.3333,
+    "id_switches": 64,
+    "gt_tracks": 23,
+    "pred_tracks": 62
+   },
+   "SNGS-058": {
+    "precision": 0.9399,
+    "recall": 0.8492,
+    "mota": 0.7906,
+    "idf1": 0.6018,
+    "team_accuracy": 0.6113,
+    "ball_recall": 0.3097,
+    "id_switches": 49,
+    "gt_tracks": 25,
+    "pred_tracks": 59
+   },
+   "SNGS-059": {
+    "precision": 0.8992,
+    "recall": 0.9033,
+    "mota": 0.7992,
+    "idf1": 0.6471,
+    "team_accuracy": 0.6462,
+    "ball_recall": 0.5179,
+    "id_switches": 38,
+    "gt_tracks": 24,
+    "pred_tracks": 52
+   },
+   "SNGS-078": {
+    "precision": 0.9711,
+    "recall": 0.9019,
+    "mota": 0.8705,
+    "idf1": 0.6056,
+    "team_accuracy": 0.7832,
+    "ball_recall": 0.4957,
+    "id_switches": 44,
+    "gt_tracks": 24,
+    "pred_tracks": 52
+   },
+   "SNGS-079": {
+    "precision": 0.9559,
+    "recall": 0.6394,
+    "mota": 0.6053,
+    "idf1": 0.6008,
+    "team_accuracy": 0.9461,
+    "ball_recall": 0.4387,
+    "id_switches": 59,
+    "gt_tracks": 24,
+    "pred_tracks": 55
+   },
+   "SNGS-080": {
+    "precision": 0.9886,
+    "recall": 0.8578,
+    "mota": 0.8416,
+    "idf1": 0.5503,
+    "team_accuracy": 0.9121,
+    "ball_recall": 0.4645,
+    "id_switches": 66,
+    "gt_tracks": 20,
+    "pred_tracks": 52
+   },
+   "SNGS-081": {
+    "precision": 0.9628,
+    "recall": 0.8775,
+    "mota": 0.8386,
+    "idf1": 0.5153,
+    "team_accuracy": 0.8554,
+    "ball_recall": 0.4871,
+    "id_switches": 61,
+    "gt_tracks": 24,
+    "pred_tracks": 65
+   },
+   "SNGS-082": {
+    "precision": 0.964,
+    "recall": 0.8525,
+    "mota": 0.8159,
+    "idf1": 0.5631,
+    "team_accuracy": 0.7733,
+    "ball_recall": 0.2227,
+    "id_switches": 66,
+    "gt_tracks": 23,
+    "pred_tracks": 57
+   },
+   "SNGS-083": {
+    "precision": 0.9525,
+    "recall": 0.8321,
+    "mota": 0.7869,
+    "idf1": 0.5855,
+    "team_accuracy": 0.5292,
+    "ball_recall": 0.2525,
+    "id_switches": 43,
+    "gt_tracks": 24,
+    "pred_tracks": 54
+   },
+   "SNGS-084": {
+    "precision": 0.9031,
+    "recall": 0.7845,
+    "mota": 0.6962,
+    "idf1": 0.5116,
+    "team_accuracy": 0.5389,
+    "ball_recall": 0.4365,
+    "id_switches": 50,
+    "gt_tracks": 24,
+    "pred_tracks": 60
+   },
+   "SNGS-085": {
+    "precision": 0.9923,
+    "recall": 0.909,
+    "mota": 0.8988,
+    "idf1": 0.708,
+    "team_accuracy": 0.9496,
+    "ball_recall": 0.488,
+    "id_switches": 40,
+    "gt_tracks": 23,
+    "pred_tracks": 48
+   },
+   "SNGS-086": {
+    "precision": 0.9861,
+    "recall": 0.7159,
+    "mota": 0.6992,
+    "idf1": 0.5431,
+    "team_accuracy": 0.8682,
+    "ball_recall": 0.4367,
+    "id_switches": 98,
+    "gt_tracks": 23,
+    "pred_tracks": 65
+   },
+   "SNGS-087": {
+    "precision": 0.9719,
+    "recall": 0.9027,
+    "mota": 0.8732,
+    "idf1": 0.7555,
+    "team_accuracy": 0.898,
+    "ball_recall": 0.4035,
+    "id_switches": 37,
+    "gt_tracks": 24,
+    "pred_tracks": 39
+   },
+   "SNGS-088": {
+    "precision": 0.9167,
+    "recall": 0.8758,
+    "mota": 0.7922,
+    "idf1": 0.6179,
+    "team_accuracy": 0.5695,
+    "ball_recall": 0.4539,
+    "id_switches": 52,
+    "gt_tracks": 23,
+    "pred_tracks": 66
+   },
+   "SNGS-089": {
+    "precision": 0.9408,
+    "recall": 0.8509,
+    "mota": 0.7941,
+    "idf1": 0.6333,
+    "team_accuracy": 0.5771,
+    "ball_recall": 0.5474,
+    "id_switches": 42,
+    "gt_tracks": 25,
+    "pred_tracks": 55
+   },
+   "SNGS-090": {
+    "precision": 0.9287,
+    "recall": 0.8085,
+    "mota": 0.7423,
+    "idf1": 0.5554,
+    "team_accuracy": 0.9102,
+    "ball_recall": 0.204,
+    "id_switches": 45,
+    "gt_tracks": 24,
+    "pred_tracks": 52
+   },
+   "SNGS-091": {
+    "precision": 0.864,
+    "recall": 0.7761,
+    "mota": 0.6509,
+    "idf1": 0.6188,
+    "team_accuracy": 0.5801,
+    "ball_recall": 0.4619,
+    "id_switches": 38,
+    "gt_tracks": 24,
+    "pred_tracks": 51
+   },
+   "SNGS-092": {
+    "precision": 0.9313,
+    "recall": 0.8422,
+    "mota": 0.7771,
+    "idf1": 0.6363,
+    "team_accuracy": 0.6094,
+    "ball_recall": 0.5952,
+    "id_switches": 39,
+    "gt_tracks": 25,
+    "pred_tracks": 61
+   },
+   "SNGS-093": {
+    "precision": 0.9514,
+    "recall": 0.7741,
+    "mota": 0.7295,
+    "idf1": 0.5308,
+    "team_accuracy": 0.8101,
+    "ball_recall": 0.7013,
+    "id_switches": 59,
+    "gt_tracks": 24,
+    "pred_tracks": 56
+   },
+   "SNGS-094": {
+    "precision": 0.9449,
+    "recall": 0.8651,
+    "mota": 0.8102,
+    "idf1": 0.6415,
+    "team_accuracy": 0.9356,
+    "ball_recall": 0.404,
+    "id_switches": 58,
+    "gt_tracks": 24,
+    "pred_tracks": 57
+   },
+   "SNGS-095": {
+    "precision": 0.923,
+    "recall": 0.8635,
+    "mota": 0.7888,
+    "idf1": 0.6997,
+    "team_accuracy": 0.594,
+    "ball_recall": 0.2088,
+    "id_switches": 26,
+    "gt_tracks": 24,
+    "pred_tracks": 49
+   },
+   "SNGS-096": {
+    "precision": 0.8021,
+    "recall": 0.6461,
+    "mota": 0.4846,
+    "idf1": 0.5533,
+    "team_accuracy": 0.6811,
+    "ball_recall": 0.817,
+    "id_switches": 34,
+    "gt_tracks": 26,
+    "pred_tracks": 60
+   }
+  }
+ },
+ "calibration": {
+  "method": "calibrate_frame (global search) on every 50th frame, Mac CPU, no tracking",
+  "summary": {
+   "dataset": "SoccerNet/SN-GSR-2025",
+   "split": "valid",
+   "every": 50,
+   "clips": 58,
+   "frames": 870,
+   "statuses": {
+    "uncalibrated": 605,
+    "calibrated": 265
+   },
+   "calibrated_share": 0.3046,
+   "foot_errors_on_calibrated_frames": {
+    "n": 4165,
+    "median_m": 56.466,
+    "p90_m": 96.168,
+    "within_1m": 0.1049,
+    "within_2m": 0.1251,
+    "within_5m": 0.1618
+   },
+   "labelled_boxes_on_sampled_frames": 14244,
+   "within_1m_of_all_labelled_boxes": 0.0307,
+   "within_2m_of_all_labelled_boxes": 0.0366,
+   "seconds_per_frame_median": 0.713,
+   "network_mb": 1151.5,
+   "wall_seconds": 1516.8
+  },
+  "per_clip": {
+   "SNGS-021": {
+    "frames": 15,
+    "calibrated": 5,
+    "errors": {
+     "n": 80,
+     "median_m": 52.325,
+     "p90_m": 82.885,
+     "within_1m": 0.2,
+     "within_2m": 0.2,
+     "within_5m": 0.2
+    }
+   },
+   "SNGS-022": {
+    "frames": 15,
+    "calibrated": 3,
+    "errors": {
+     "n": 41,
+     "median_m": 63.298,
+     "p90_m": 82.169,
+     "within_1m": 0.0,
+     "within_2m": 0.0,
+     "within_5m": 0.0
+    }
+   },
+   "SNGS-023": {
+    "frames": 15,
+    "calibrated": 2,
+    "errors": {
+     "n": 42,
+     "median_m": 85.525,
+     "p90_m": 132.672,
+     "within_1m": 0.0,
+     "within_2m": 0.0,
+     "within_5m": 0.0
+    }
+   },
+   "SNGS-024": {
+    "frames": 15,
+    "calibrated": 5,
+    "errors": {
+     "n": 36,
+     "median_m": 62.593,
+     "p90_m": 96.035,
+     "within_1m": 0.0,
+     "within_2m": 0.0,
+     "within_5m": 0.0
+    }
+   },
+   "SNGS-025": {
+    "frames": 15,
+    "calibrated": 8,
+    "errors": {
+     "n": 146,
+     "median_m": 63.36,
+     "p90_m": 99.744,
+     "within_1m": 0.0411,
+     "within_2m": 0.1027,
+     "within_5m": 0.1301
+    }
+   },
+   "SNGS-026": {
+    "frames": 15,
+    "calibrated": 7,
+    "errors": {
+     "n": 75,
+     "median_m": 81.855,
+     "p90_m": 94.893,
+     "within_1m": 0.0,
+     "within_2m": 0.0,
+     "within_5m": 0.0
+    }
+   },
+   "SNGS-027": {
+    "frames": 15,
+    "calibrated": 5,
+    "errors": {
+     "n": 79,
+     "median_m": 90.723,
+     "p90_m": 97.99,
+     "within_1m": 0.0,
+     "within_2m": 0.0,
+     "within_5m": 0.0
+    }
+   },
+   "SNGS-028": {
+    "frames": 15,
+    "calibrated": 6,
+    "errors": {
+     "n": 61,
+     "median_m": 49.245,
+     "p90_m": 149.657,
+     "within_1m": 0.0,
+     "within_2m": 0.0164,
+     "within_5m": 0.0164
+    }
+   },
+   "SNGS-029": {
+    "frames": 15,
+    "calibrated": 7,
+    "errors": {
+     "n": 88,
+     "median_m": 62.916,
+     "p90_m": 84.979,
+     "within_1m": 0.0,
+     "within_2m": 0.0,
+     "within_5m": 0.0341
+    }
+   },
+   "SNGS-030": {
+    "frames": 15,
+    "calibrated": 4,
+    "errors": {
+     "n": 63,
+     "median_m": 78.922,
+     "p90_m": 90.931,
+     "within_1m": 0.0,
+     "within_2m": 0.0,
+     "within_5m": 0.0159
+    }
+   },
+   "SNGS-031": {
+    "frames": 15,
+    "calibrated": 8,
+    "errors": {
+     "n": 119,
+     "median_m": 76.93,
+     "p90_m": 99.159,
+     "within_1m": 0.0,
+     "within_2m": 0.0,
+     "within_5m": 0.0
+    }
+   },
+   "SNGS-032": {
+    "frames": 15,
+    "calibrated": 9,
+    "errors": {
+     "n": 114,
+     "median_m": 51.269,
+     "p90_m": 82.951,
+     "within_1m": 0.0,
+     "within_2m": 0.0263,
+     "within_5m": 0.0789
+    }
+   },
+   "SNGS-033": {
+    "frames": 15,
+    "calibrated": 7,
+    "errors": {
+     "n": 74,
+     "median_m": 63.186,
+     "p90_m": 97.751,
+     "within_1m": 0.0,
+     "within_2m": 0.0,
+     "within_5m": 0.0
+    }
+   },
+   "SNGS-034": {
+    "frames": 15,
+    "calibrated": 3,
+    "errors": {
+     "n": 54,
+     "median_m": 2.966,
+     "p90_m": 27.59,
+     "within_1m": 0.3333,
+     "within_2m": 0.4074,
+     "within_5m": 0.6667
+    }
+   },
+   "SNGS-035": {
+    "frames": 15,
+    "calibrated": 6,
+    "errors": {
+     "n": 36,
+     "median_m": 64.059,
+     "p90_m": 83.88,
+     "within_1m": 0.0,
+     "within_2m": 0.0,
+     "within_5m": 0.0
+    }
+   },
+   "SNGS-036": {
+    "frames": 15,
+    "calibrated": 9,
+    "errors": {
+     "n": 170,
+     "median_m": 57.048,
+     "p90_m": 75.111,
+     "within_1m": 0.0,
+     "within_2m": 0.0,
+     "within_5m": 0.0
+    }
+   },
+   "SNGS-037": {
+    "frames": 15,
+    "calibrated": 1,
+    "errors": {
+     "n": 13,
+     "median_m": 59.729,
+     "p90_m": 68.451,
+     "within_1m": 0.0,
+     "within_2m": 0.0,
+     "within_5m": 0.0
+    }
+   },
+   "SNGS-038": {
+    "frames": 15,
+    "calibrated": 1,
+    "errors": {
+     "n": 14,
+     "median_m": 82.799,
+     "p90_m": 96.003,
+     "within_1m": 0.0,
+     "within_2m": 0.0,
+     "within_5m": 0.0
+    }
+   },
+   "SNGS-039": {
+    "frames": 15,
+    "calibrated": 3,
+    "errors": {
+     "n": 51,
+     "median_m": 0.32,
+     "p90_m": 5.927,
+     "within_1m": 0.7059,
+     "within_2m": 0.7451,
+     "within_5m": 0.8627
+    }
+   },
+   "SNGS-040": {
+    "frames": 15,
+    "calibrated": 3,
+    "errors": {
+     "n": 60,
+     "median_m": 14.637,
+     "p90_m": 98.605,
+     "within_1m": 0.3,
+     "within_2m": 0.35,
+     "within_5m": 0.3667
+    }
+   },
+   "SNGS-041": {
+    "frames": 15,
+    "calibrated": 2,
+    "errors": {
+     "n": 32,
+     "median_m": 41.196,
+     "p90_m": 64.908,
+     "within_1m": 0.0,
+     "within_2m": 0.0,
+     "within_5m": 0.0
+    }
+   },
+   "SNGS-042": {
+    "frames": 15,
+    "calibrated": 5,
+    "errors": {
+     "n": 95,
+     "median_m": 10.293,
+     "p90_m": 47.594,
+     "within_1m": 0.4421,
+     "within_2m": 0.4526,
+     "within_5m": 0.4842
+    }
+   },
+   "SNGS-043": {
+    "frames": 15,
+    "calibrated": 3,
+    "errors": {
+     "n": 44,
+     "median_m": 71.1,
+     "p90_m": 85.474,
+     "within_1m": 0.0,
+     "within_2m": 0.0,
+     "within_5m": 0.0227
+    }
+   },
+   "SNGS-044": {
+    "frames": 15,
+    "calibrated": 1,
+    "errors": {
+     "n": 18,
+     "median_m": 90.895,
+     "p90_m": 151.919,
+     "within_1m": 0.0,
+     "within_2m": 0.0,
+     "within_5m": 0.0
+    }
+   },
+   "SNGS-045": {
+    "frames": 15,
+    "calibrated": 2,
+    "errors": {
+     "n": 32,
+     "median_m": 78.276,
+     "p90_m": 157.709,
+     "within_1m": 0.0,
+     "within_2m": 0.0,
+     "within_5m": 0.0
+    }
+   },
+   "SNGS-046": {
+    "frames": 15,
+    "calibrated": 2,
+    "errors": {
+     "n": 38,
+     "median_m": 80.743,
+     "p90_m": 141.293,
+     "within_1m": 0.0,
+     "within_2m": 0.0,
+     "within_5m": 0.0
+    }
+   },
+   "SNGS-047": {
+    "frames": 15,
+    "calibrated": 1,
+    "errors": {
+     "n": 16,
+     "median_m": 67.928,
+     "p90_m": 76.663,
+     "within_1m": 0.0,
+     "within_2m": 0.0,
+     "within_5m": 0.0
+    }
+   },
+   "SNGS-048": {
+    "frames": 15,
+    "calibrated": 1,
+    "errors": {
+     "n": 21,
+     "median_m": 56.549,
+     "p90_m": 69.26,
+     "within_1m": 0.0,
+     "within_2m": 0.0,
+     "within_5m": 0.0
+    }
+   },
+   "SNGS-049": {
+    "frames": 15,
+    "calibrated": 4,
+    "errors": {
+     "n": 81,
+     "median_m": 37.208,
+     "p90_m": 437.279,
+     "within_1m": 0.4321,
+     "within_2m": 0.4568,
+     "within_5m": 0.4568
+    }
+   },
+   "SNGS-050": {
+    "frames": 15,
+    "calibrated": 3,
+    "errors": {
+     "n": 63,
+     "median_m": 0.587,
+     "p90_m": 29.211,
+     "within_1m": 0.6667,
+     "within_2m": 0.6667,
+     "within_5m": 0.6667
+    }
+   },
+   "SNGS-051": {
+    "frames": 15,
+    "calibrated": 4,
+    "errors": {
+     "n": 17,
+     "median_m": 4.761,
+     "p90_m": 5.589,
+     "within_1m": 0.2353,
+     "within_2m": 0.2353,
+     "within_5m": 0.5294
+    }
+   },
+   "SNGS-052": {
+    "frames": 15,
+    "calibrated": 8,
+    "errors": {
+     "n": 145,
+     "median_m": 1.253,
+     "p90_m": 43.83,
+     "within_1m": 0.4552,
+     "within_2m": 0.6,
+     "within_5m": 0.7655
+    }
+   },
+   "SNGS-053": {
+    "frames": 15,
+    "calibrated": 3,
+    "errors": {
+     "n": 56,
+     "median_m": 62.193,
+     "p90_m": 84.188,
+     "within_1m": 0.0,
+     "within_2m": 0.0,
+     "within_5m": 0.0
+    }
+   },
+   "SNGS-054": {
+    "frames": 15,
+    "calibrated": 7,
+    "errors": {
+     "n": 105,
+     "median_m": 1.34,
+     "p90_m": 747.894,
+     "within_1m": 0.4571,
+     "within_2m": 0.581,
+     "within_5m": 0.6381
+    }
+   },
+   "SNGS-055": {
+    "frames": 15,
+    "calibrated": 3,
+    "errors": {
+     "n": 46,
+     "median_m": 43.224,
+     "p90_m": 61.581,
+     "within_1m": 0.0,
+     "within_2m": 0.0,
+     "within_5m": 0.0
+    }
+   },
+   "SNGS-056": {
+    "frames": 15,
+    "calibrated": 3,
+    "errors": {
+     "n": 39,
+     "median_m": 0.511,
+     "p90_m": 6.427,
+     "within_1m": 0.6667,
+     "within_2m": 0.6667,
+     "within_5m": 0.8205
+    }
+   },
+   "SNGS-057": {
+    "frames": 15,
+    "calibrated": 4,
+    "errors": {
+     "n": 88,
+     "median_m": 63.069,
+     "p90_m": 89.399,
+     "within_1m": 0.0,
+     "within_2m": 0.0,
+     "within_5m": 0.0
+    }
+   },
+   "SNGS-058": {
+    "frames": 15,
+    "calibrated": 7,
+    "errors": {
+     "n": 108,
+     "median_m": 10.384,
+     "p90_m": 85.759,
+     "within_1m": 0.4722,
+     "within_2m": 0.4815,
+     "within_5m": 0.4815
+    }
+   },
+   "SNGS-059": {
+    "frames": 15,
+    "calibrated": 1,
+    "errors": {
+     "n": 16,
+     "median_m": 28.516,
+     "p90_m": 33.907,
+     "within_1m": 0.0,
+     "within_2m": 0.0,
+     "within_5m": 0.0
+    }
+   },
+   "SNGS-078": {
+    "frames": 15,
+    "calibrated": 6,
+    "errors": {
+     "n": 77,
+     "median_m": 37.07,
+     "p90_m": 92.204,
+     "within_1m": 0.2078,
+     "within_2m": 0.2727,
+     "within_5m": 0.4286
+    }
+   },
+   "SNGS-079": {
+    "frames": 15,
+    "calibrated": 5,
+    "errors": {
+     "n": 98,
+     "median_m": 63.808,
+     "p90_m": 164.597,
+     "within_1m": 0.0714,
+     "within_2m": 0.1429,
+     "within_5m": 0.3776
+    }
+   },
+   "SNGS-080": {
+    "frames": 15,
+    "calibrated": 3,
+    "errors": {
+     "n": 46,
+     "median_m": 34.361,
+     "p90_m": 87.579,
+     "within_1m": 0.0,
+     "within_2m": 0.0,
+     "within_5m": 0.0
+    }
+   },
+   "SNGS-081": {
+    "frames": 15,
+    "calibrated": 5,
+    "errors": {
+     "n": 73,
+     "median_m": 46.933,
+     "p90_m": 86.154,
+     "within_1m": 0.0,
+     "within_2m": 0.0,
+     "within_5m": 0.0
+    }
+   },
+   "SNGS-082": {
+    "frames": 15,
+    "calibrated": 6,
+    "errors": {
+     "n": 114,
+     "median_m": 54.352,
+     "p90_m": 88.34,
+     "within_1m": 0.0,
+     "within_2m": 0.0,
+     "within_5m": 0.0351
+    }
+   },
+   "SNGS-083": {
+    "frames": 15,
+    "calibrated": 8,
+    "errors": {
+     "n": 132,
+     "median_m": 39.958,
+     "p90_m": 94.57,
+     "within_1m": 0.0076,
+     "within_2m": 0.053,
+     "within_5m": 0.2348
+    }
+   },
+   "SNGS-084": {
+    "frames": 15,
+    "calibrated": 6,
+    "errors": {
+     "n": 90,
+     "median_m": 60.718,
+     "p90_m": 92.352,
+     "within_1m": 0.0556,
+     "within_2m": 0.1222,
+     "within_5m": 0.2333
+    }
+   },
+   "SNGS-085": {
+    "frames": 15,
+    "calibrated": 8,
+    "errors": {
+     "n": 142,
+     "median_m": 58.459,
+     "p90_m": 72.749,
+     "within_1m": 0.0,
+     "within_2m": 0.0,
+     "within_5m": 0.0
+    }
+   },
+   "SNGS-086": {
+    "frames": 15,
+    "calibrated": 7,
+    "errors": {
+     "n": 136,
+     "median_m": 86.757,
+     "p90_m": 99.34,
+     "within_1m": 0.0,
+     "within_2m": 0.0,
+     "within_5m": 0.0
+    }
+   },
+   "SNGS-087": {
+    "frames": 15,
+    "calibrated": 1,
+    "errors": {
+     "n": 18,
+     "median_m": 80.204,
+     "p90_m": 82.905,
+     "within_1m": 0.0,
+     "within_2m": 0.0,
+     "within_5m": 0.0
+    }
+   },
+   "SNGS-088": {
+    "frames": 15,
+    "calibrated": 2,
+    "errors": {
+     "n": 38,
+     "median_m": 70.599,
+     "p90_m": 87.539,
+     "within_1m": 0.0,
+     "within_2m": 0.0,
+     "within_5m": 0.0
+    }
+   },
+   "SNGS-089": {
+    "frames": 15,
+    "calibrated": 4,
+    "errors": {
+     "n": 76,
+     "median_m": 64.819,
+     "p90_m": 82.145,
+     "within_1m": 0.0,
+     "within_2m": 0.0,
+     "within_5m": 0.0
+    }
+   },
+   "SNGS-090": {
+    "frames": 15,
+    "calibrated": 7,
+    "errors": {
+     "n": 99,
+     "median_m": 89.072,
+     "p90_m": 176.498,
+     "within_1m": 0.0,
+     "within_2m": 0.0,
+     "within_5m": 0.0
+    }
+   },
+   "SNGS-091": {
+    "frames": 15,
+    "calibrated": 6,
+    "errors": {
+     "n": 104,
+     "median_m": 50.852,
+     "p90_m": 119.96,
+     "within_1m": 0.0,
+     "within_2m": 0.0,
+     "within_5m": 0.0
+    }
+   },
+   "SNGS-092": {
+    "frames": 15,
+    "calibrated": 9,
+    "errors": {
+     "n": 159,
+     "median_m": 64.809,
+     "p90_m": 200.954,
+     "within_1m": 0.0,
+     "within_2m": 0.0,
+     "within_5m": 0.0
+    }
+   },
+   "SNGS-093": {
+    "frames": 15,
+    "calibrated": 4,
+    "errors": {
+     "n": 68,
+     "median_m": 97.867,
+     "p90_m": 120.641,
+     "within_1m": 0.0,
+     "within_2m": 0.0,
+     "within_5m": 0.0
+    }
+   },
+   "SNGS-094": {
+    "frames": 15,
+    "calibrated": 4,
+    "errors": {
+     "n": 68,
+     "median_m": 55.138,
+     "p90_m": 87.816,
+     "within_1m": 0.0,
+     "within_2m": 0.0,
+     "within_5m": 0.0
+    }
+   },
+   "SNGS-095": {
+    "frames": 15,
+    "calibrated": 5,
+    "errors": {
+     "n": 86,
+     "median_m": 48.566,
+     "p90_m": 68.16,
+     "within_1m": 0.0,
+     "within_2m": 0.0,
+     "within_5m": 0.0
+    }
+   },
+   "SNGS-096": {
+    "frames": 15,
+    "calibrated": 3,
+    "errors": {
+     "n": 65,
+     "median_m": 56.962,
+     "p90_m": 75.337,
+     "within_1m": 0.0,
+     "within_2m": 0.0,
+     "within_5m": 0.0
+    }
+   }
+  }
+ }
+}

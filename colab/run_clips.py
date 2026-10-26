@@ -63,8 +63,26 @@ class CmdResult:
 Runner = Callable[[List[str], Optional[str]], CmdResult]
 
 
+def _wall_timeout(cmd: List[str]) -> float:
+    """A hard local limit for one CLI call. ``colab exec --timeout`` is not enforced when the
+    client loses the kernel's reply (2026-10-26: a call waited 35 min on an idle VM), so the
+    runner enforces its own: the exec's timeout plus two minutes, else ten minutes."""
+    if "--timeout" in cmd:
+        try:
+            return float(cmd[cmd.index("--timeout") + 1]) + 120.0
+        except (IndexError, ValueError):
+            pass
+    return 600.0
+
+
 def subprocess_runner(cmd: List[str], stdin_text: Optional[str] = None) -> CmdResult:
-    p = subprocess.run(cmd, input=stdin_text, text=True, capture_output=True)
+    try:
+        p = subprocess.run(cmd, input=stdin_text, text=True, capture_output=True, timeout=_wall_timeout(cmd))
+    except subprocess.TimeoutExpired as e:
+        out = e.stdout.decode() if isinstance(e.stdout, bytes) else (e.stdout or "")
+        msg = f"timed out after {_wall_timeout(cmd):.0f} s (local limit)"
+        sys.stderr.write(f"[run_clips] {' '.join(cmd[:3])} {msg}\n")
+        return CmdResult(124, out, msg)
     if p.stdout:
         sys.stdout.write(p.stdout if p.stdout.endswith("\n") else p.stdout + "\n")
     if p.stderr:
@@ -116,14 +134,26 @@ class ColabSession:
     def upload(self, local: Path, remote: str) -> None:
         self._run("upload", "-s", self.name, str(local), remote)
 
-    def download(self, remote: str, local: Path) -> None:
+    def download(self, remote: str, local: Path, attempts: int = 4, wait_s: float = 5.0) -> None:
+        """``colab download`` with retries: a transient CLI failure (rc=1, empty stderr, seen on
+        2026-10-26 after the clip had been processed fine) must not end the whole session."""
         local.parent.mkdir(parents=True, exist_ok=True)
-        self._run("download", "-s", self.name, remote, str(local))
+        for k in range(1, attempts + 1):
+            res = self._run("download", "-s", self.name, remote, str(local), check=False)
+            if res.returncode == 0:
+                return
+            print(f"[run_clips] download of {remote} failed (rc={res.returncode}), attempt {k}/{attempts}")
+            if k < attempts:
+                time.sleep(wait_s * k)
+        raise RuntimeError(f"colab download failed {attempts} times (rc={res.returncode}): {res.stderr.strip()[-500:]}")
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--clips", nargs="+", required=True, help="clip names, e.g. SNGS-021")
+    which = p.add_mutually_exclusive_group(required=True)
+    which.add_argument("--clips", nargs="+", help="clip names, e.g. SNGS-021")
+    which.add_argument("--all", action="store_true",
+                       help="every clip of --split, listed from the dataset's zip (needs --hf-layout zip)")
     p.add_argument("--split", default="valid", choices=["train", "valid", "test", "challenge"])
     p.add_argument("--ref", required=True, help="git commit (or branch) of this repo to run on the VM; pin a SHA")
     p.add_argument("--repo", default=DEFAULT_REPO)
@@ -141,11 +171,24 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                    help="skip the per-frame pitch-line calibration (null bbox_pitch, no GS-HOTA); it costs CPU time per frame")
     p.add_argument("--hf-dataset", default="SoccerNet/SN-GSR-2025", help="Hugging Face dataset repo id")
     p.add_argument("--hf-revision", default="main", help="pin to a dataset commit once known")
-    p.add_argument("--clip-pattern", default="{split}/{clip}/*", help="allow_patterns template inside the dataset repo")
+    p.add_argument("--hf-layout", default="zip", choices=["zip", "folders"],
+                   help="zip: one <split>.zip per split, clips range-read out of it (SN-GSR-2025); folders: per-clip download")
+    p.add_argument("--clip-pattern", default="{split}/{clip}/*", help="allow_patterns template (folders layout only)")
     p.add_argument("--resume", action="store_true", help="skip clips whose Labels-GameState.json is already local")
     p.add_argument("--colab", default=DEFAULT_COLAB)
     p.add_argument("--dry-run", action="store_true", help="print the commands instead of running them")
     return p.parse_args(argv)
+
+
+def list_dataset_clips(hf_dataset: str, split: str, revision: str = "main") -> List[str]:
+    """Clip names in ``<split>.zip`` of the dataset, read from the zip's directory (a few MB)."""
+    if str(HERE.parent) not in sys.path:
+        sys.path.insert(0, str(HERE.parent))
+    from varlab_vision.remote_zip import clip_index, hf_dataset_file_url, open_remote_zip
+
+    zf, _rf = open_remote_zip(hf_dataset_file_url(hf_dataset, f"{split}.zip", revision), block_size=4 * 2 ** 20,
+                              token=os.environ.get("HF_TOKEN"))
+    return list(clip_index(zf))
 
 
 def pending_clips(clips: Sequence[str], out: Path, resume: bool) -> List[str]:
@@ -166,6 +209,11 @@ def run(args: argparse.Namespace, runner: Optional[Runner] = None) -> int:
     dry = args.dry_run
     runner = runner or (printing_runner if dry else subprocess_runner)
     out = Path(args.out)
+    if args.all:
+        if args.hf_layout != "zip":
+            raise SystemExit("--all needs --hf-layout zip")
+        args.clips = list_dataset_clips(args.hf_dataset, args.split, args.hf_revision)
+        print(f"[run_clips] --all: {len(args.clips)} clips in {args.hf_dataset} {args.split}.zip")
     todo = pending_clips(args.clips, out, args.resume)
     budget_s = args.budget_min * 60.0
     session = ColabSession(args.session, args.gpu, runner, args.colab)
@@ -192,14 +240,14 @@ def run(args: argparse.Namespace, runner: Optional[Runner] = None) -> int:
                 except OSError:
                     pass
         else:
-            print("[run_clips] HF_TOKEN not set: the worker will try Colab Secrets, else gated downloads fail")
+            print("[run_clips] HF_TOKEN not set: fine for a public dataset; the worker also tries Colab Secrets")
         session.install(REQUIREMENTS)
         session.restart_kernel()
         session.exec_file(WORKER, timeout=args.setup_timeout)
         setup_call = (f"setup(ref={args.ref!r}, repo={args.repo!r}, detector_size={args.detector_size!r}, "
                       f"with_pose={not args.no_pose!r}, with_calibration={not args.no_calibration!r}, "
                       f"hf_dataset={args.hf_dataset!r}, hf_revision={args.hf_revision!r}, "
-                      f"clip_pattern={args.clip_pattern!r})")
+                      f"clip_pattern={args.clip_pattern!r}, hf_layout={args.hf_layout!r})")
         session.exec_code(setup_call, timeout=args.setup_timeout)
         for clip in todo:
             elapsed = time.monotonic() - t_start
@@ -239,6 +287,10 @@ def run(args: argparse.Namespace, runner: Optional[Runner] = None) -> int:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    try:
+        sys.stdout.reconfigure(line_buffering=True)  # progress reaches a log file as it happens
+    except (AttributeError, ValueError):
+        pass
     return run(parse_args(argv))
 
 

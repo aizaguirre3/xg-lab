@@ -138,3 +138,66 @@ def test_dry_run_prints_commands_without_a_runner(capsys):
     captured = capsys.readouterr().out
     assert code == 0 and "colab new" in captured and "process_clip('A'" in captured and "colab stop" in captured
     assert "colab install" in captured and "colab restart-kernel" in captured
+
+
+def test_all_lists_the_clips_from_the_dataset_zip_and_passes_the_layout(tmp_path: Path, monkeypatch):
+    rc = load_module("run_clips")
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    seen = []
+    monkeypatch.setattr(rc, "list_dataset_clips", lambda ds, split, rev: seen.append((ds, split, rev)) or
+                        ["SNGS-021", "SNGS-022"])
+    fake = FakeColab(tmp_path)
+    args = rc.parse_args(["--all", "--ref", "abc123", "--out", str(tmp_path / "out")])
+    assert rc.run(args, runner=fake) == 0
+    assert seen == [("SoccerNet/SN-GSR-2025", "valid", "main")]
+    execs = [s for c, s in fake.calls if c[1] == "exec" and s]
+    assert any("setup(" in s and "hf_layout='zip'" in s for s in execs)
+    assert [s for s in execs if "process_clip(" in s] == [
+        "process_clip('SNGS-021', split='valid')", "process_clip('SNGS-022', split='valid')"]
+
+
+def test_all_and_clips_are_exclusive_and_all_needs_the_zip_layout(tmp_path: Path):
+    rc = load_module("run_clips")
+    with pytest.raises(SystemExit):
+        rc.parse_args(["--all", "--clips", "A", "--ref", "x", "--out", str(tmp_path)])
+    with pytest.raises(SystemExit):
+        rc.parse_args(["--ref", "x", "--out", str(tmp_path)])  # one of the two is required
+    args = rc.parse_args(["--all", "--hf-layout", "folders", "--ref", "x", "--out", str(tmp_path)])
+    with pytest.raises(SystemExit):
+        rc.run(args, runner=FakeColab(tmp_path))
+
+
+def test_a_transient_download_failure_is_retried_not_fatal(tmp_path: Path, monkeypatch):
+    rc = load_module("run_clips")
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.setattr(rc.time, "sleep", lambda s: None)
+
+    class Flaky(FakeColab):
+        def __init__(self, out_dir):
+            super().__init__(out_dir)
+            self.failed = 0
+
+        def __call__(self, cmd, stdin_text=None):
+            if len(cmd) > 1 and cmd[1] == "download" and self.failed < 2:
+                self.failed += 1
+                self.calls.append((list(cmd), stdin_text))
+                return load_module("run_clips").CmdResult(1, "", "")
+            return super().__call__(cmd, stdin_text)
+
+    fake = Flaky(tmp_path)
+    args = rc.parse_args(["--clips", "SNGS-021", "--ref", "abc", "--out", str(tmp_path / "out")])
+    assert rc.run(args, runner=fake) == 0
+    assert fake.failed == 2 and (tmp_path / "out" / "SNGS-021" / "Labels-GameState.json").exists()
+
+
+def test_the_runner_enforces_its_own_wall_clock_limit(monkeypatch):
+    rc = load_module("run_clips")
+    assert rc._wall_timeout(["colab", "exec", "-s", "x", "--timeout", "900.0"]) == 1020.0
+    assert rc._wall_timeout(["colab", "download", "-s", "x", "a", "b"]) == 600.0
+
+    def hang(cmd, **kw):
+        raise rc.subprocess.TimeoutExpired(cmd, kw["timeout"], output="partial")
+
+    monkeypatch.setattr(rc.subprocess, "run", hang)
+    res = rc.subprocess_runner(["colab", "exec", "-s", "x", "--timeout", "1"])
+    assert res.returncode == 124 and "timed out" in res.stderr and res.stdout == "partial"
