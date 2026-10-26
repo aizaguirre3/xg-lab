@@ -63,8 +63,26 @@ class CmdResult:
 Runner = Callable[[List[str], Optional[str]], CmdResult]
 
 
+def _wall_timeout(cmd: List[str]) -> float:
+    """A hard local limit for one CLI call. ``colab exec --timeout`` is not enforced when the
+    client loses the kernel's reply (2026-10-26: a call waited 35 min on an idle VM), so the
+    runner enforces its own: the exec's timeout plus two minutes, else ten minutes."""
+    if "--timeout" in cmd:
+        try:
+            return float(cmd[cmd.index("--timeout") + 1]) + 120.0
+        except (IndexError, ValueError):
+            pass
+    return 600.0
+
+
 def subprocess_runner(cmd: List[str], stdin_text: Optional[str] = None) -> CmdResult:
-    p = subprocess.run(cmd, input=stdin_text, text=True, capture_output=True)
+    try:
+        p = subprocess.run(cmd, input=stdin_text, text=True, capture_output=True, timeout=_wall_timeout(cmd))
+    except subprocess.TimeoutExpired as e:
+        out = e.stdout.decode() if isinstance(e.stdout, bytes) else (e.stdout or "")
+        msg = f"timed out after {_wall_timeout(cmd):.0f} s (local limit)"
+        sys.stderr.write(f"[run_clips] {' '.join(cmd[:3])} {msg}\n")
+        return CmdResult(124, out, msg)
     if p.stdout:
         sys.stdout.write(p.stdout if p.stdout.endswith("\n") else p.stdout + "\n")
     if p.stderr:
@@ -269,6 +287,10 @@ def run(args: argparse.Namespace, runner: Optional[Runner] = None) -> int:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    try:
+        sys.stdout.reconfigure(line_buffering=True)  # progress reaches a log file as it happens
+    except (AttributeError, ValueError):
+        pass
     return run(parse_args(argv))
 
 

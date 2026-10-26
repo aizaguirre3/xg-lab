@@ -188,3 +188,16 @@ def test_a_transient_download_failure_is_retried_not_fatal(tmp_path: Path, monke
     args = rc.parse_args(["--clips", "SNGS-021", "--ref", "abc", "--out", str(tmp_path / "out")])
     assert rc.run(args, runner=fake) == 0
     assert fake.failed == 2 and (tmp_path / "out" / "SNGS-021" / "Labels-GameState.json").exists()
+
+
+def test_the_runner_enforces_its_own_wall_clock_limit(monkeypatch):
+    rc = load_module("run_clips")
+    assert rc._wall_timeout(["colab", "exec", "-s", "x", "--timeout", "900.0"]) == 1020.0
+    assert rc._wall_timeout(["colab", "download", "-s", "x", "a", "b"]) == 600.0
+
+    def hang(cmd, **kw):
+        raise rc.subprocess.TimeoutExpired(cmd, kw["timeout"], output="partial")
+
+    monkeypatch.setattr(rc.subprocess, "run", hang)
+    res = rc.subprocess_runner(["colab", "exec", "-s", "x", "--timeout", "1"])
+    assert res.returncode == 124 and "timed out" in res.stderr and res.stdout == "partial"
