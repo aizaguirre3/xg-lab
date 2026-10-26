@@ -154,3 +154,22 @@ def test_http_range_fetcher_sends_the_token_only_when_given(monkeypatch):
 def test_hf_url():
     assert rz.hf_dataset_file_url("SoccerNet/SN-GSR-2025", "valid.zip") == \
         "https://huggingface.co/datasets/SoccerNet/SN-GSR-2025/resolve/main/valid.zip"
+
+
+def test_retries_are_reported_through_the_log_callback(monkeypatch):
+    blob = bytes(range(50))
+    state = {"failed": False}
+
+    def flaky(req, timeout=None):
+        s, e = (int(v) for v in req.headers["Range"].split("=")[1].split("-"))
+        if s == 10 and not state["failed"]:
+            state["failed"] = True
+            raise urllib.error.URLError("429 rate limited")
+        return _FakeResponse(blob[s:e + 1], s, e, len(blob))
+
+    monkeypatch.setattr(rz.urllib.request, "urlopen", flaky)
+    monkeypatch.setattr(rz.time, "sleep", lambda s: None)
+    lines = []
+    fetch, _ = rz.http_range_fetcher("https://example.invalid/z.zip", log=lines.append)
+    assert fetch(10, 20) == blob[10:20]
+    assert len(lines) == 1 and "retry 1/4" in lines[0] and "429" in lines[0]

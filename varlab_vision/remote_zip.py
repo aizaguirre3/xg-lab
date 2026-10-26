@@ -34,7 +34,8 @@ def hf_dataset_file_url(repo: str, filename: str, revision: str = "main") -> str
 
 
 def http_range_fetcher(url: str, token: Optional[str] = None, timeout: float = 120.0,
-                       retries: int = 5, user_agent: str = "varlab-remote-zip/1") -> Tuple[Fetch, int]:
+                       retries: int = 5, user_agent: str = "varlab-remote-zip/1",
+                       log: Optional[Callable[[str], None]] = None) -> Tuple[Fetch, int]:
     """A ``fetch(start, end)`` that issues one HTTP range request per call, and the file size.
 
     Redirects (Hugging Face sends a 302 to its storage) are followed by urllib, which
@@ -57,6 +58,8 @@ def http_range_fetcher(url: str, token: Optional[str] = None, timeout: float = 1
             except (urllib.error.URLError, TimeoutError, ConnectionError, IOError) as e:
                 if attempt == retries - 1:
                     raise IOError(f"range {start}-{end_inclusive} of {url} failed after {retries} tries: {e}") from e
+                if log is not None:
+                    log(f"range {start}-{end_inclusive}: {type(e).__name__}: {e}; retry {attempt + 1}/{retries - 1} in {delay:.0f} s")
                 time.sleep(delay)
                 delay *= 2
         raise AssertionError("unreachable")
@@ -151,8 +154,8 @@ class RangeFile:
 
 
 def open_remote_zip(url: str, token: Optional[str] = None, block_size: int = DEFAULT_BLOCK,
-                    max_blocks: int = 4) -> Tuple[zipfile.ZipFile, RangeFile]:
-    fetch, size = http_range_fetcher(url, token=token)
+                    max_blocks: int = 4, log: Optional[Callable[[str], None]] = None) -> Tuple[zipfile.ZipFile, RangeFile]:
+    fetch, size = http_range_fetcher(url, token=token, log=log)
     rf = RangeFile(fetch, size, block_size=block_size, max_blocks=max_blocks)
     return zipfile.ZipFile(rf), rf
 

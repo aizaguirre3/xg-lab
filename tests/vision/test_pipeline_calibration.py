@@ -585,3 +585,13 @@ def test_worker_reads_a_clip_out_of_the_split_zip(tmp_path: Path, monkeypatch):
     assert not (tmp_path / "data" / "valid" / "SNGS-077" / "img1").exists()  # frames removed after the run
     worker.process_clip("SNGS-077", split="valid")
     assert len(opened) == 1  # the split's zip directory is read once per kernel
+
+
+def test_worker_heartbeat_prints_while_a_step_is_silent(capsys):
+    import time as _time
+
+    worker = _load_colab("vision_worker")
+    with worker._Heartbeat("SNGS-000", every=0.05):
+        _time.sleep(0.2)
+    out = capsys.readouterr().out
+    assert out.count("SNGS-000: still working") >= 2

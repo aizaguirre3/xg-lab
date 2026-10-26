@@ -146,7 +146,8 @@ def _split_zip(split: str):
     cache = _STATE.setdefault("zips", {})
     if split not in cache:
         url = hf_dataset_file_url(_STATE["hf_dataset"], f"{split}.zip", _STATE["hf_revision"])
-        zf, rf = open_remote_zip(url, token=os.environ.get("HF_TOKEN"))
+        zf, rf = open_remote_zip(url, token=os.environ.get("HF_TOKEN"),
+                                 log=lambda m: print(f"  [remote zip] {m}", flush=True))
         cache[split] = (zf, rf, clip_index(zf))
         print(f"opened {url}: {rf.size / 1e9:.2f} GB, {len(cache[split][2])} clips", flush=True)
     return cache[split]
@@ -183,8 +184,40 @@ def _fetch_clip(clip: str, split: str) -> Path:
                             "check --clip-pattern against the dataset layout")
 
 
+class _Heartbeat:
+    """Print a line every ``every`` seconds while a block runs. ``colab exec`` gives up with
+    "Timeout waiting for output" when the kernel is silent for too long (2026-10-26, during a
+    clip whose download was being retried), so long silent steps must keep talking."""
+
+    def __init__(self, label: str, every: float = 20.0):
+        import threading
+
+        self.label, self.every = label, every
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._t0 = time.time()
+
+    def _run(self):
+        while not self._stop.wait(self.every):
+            print(f"  {self.label}: still working ({time.time() - self._t0:.0f} s)", flush=True)
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._stop.set()
+        self._thread.join(timeout=1.0)
+        return False
+
+
 def process_clip(clip: str, split: str = "valid", local_root: str | None = None, delete_frames: bool = True) -> dict:
     """Run the pipeline on one clip and write ``/content/varlab_out/<split>/<clip>/{Labels-GameState.json,report.json}``."""
+    with _Heartbeat(clip):
+        return _process_clip(clip, split, local_root, delete_frames)
+
+
+def _process_clip(clip: str, split: str, local_root: str | None, delete_frames: bool) -> dict:
     from varlab_vision.gshota import gs_hota
     from varlab_vision.gsr_format import LABELS_FILE
     from varlab_vision.loaders import list_frames, objects_frame, read_gsr_clip
