@@ -116,9 +116,18 @@ class ColabSession:
     def upload(self, local: Path, remote: str) -> None:
         self._run("upload", "-s", self.name, str(local), remote)
 
-    def download(self, remote: str, local: Path) -> None:
+    def download(self, remote: str, local: Path, attempts: int = 4, wait_s: float = 5.0) -> None:
+        """``colab download`` with retries: a transient CLI failure (rc=1, empty stderr, seen on
+        2026-10-26 after the clip had been processed fine) must not end the whole session."""
         local.parent.mkdir(parents=True, exist_ok=True)
-        self._run("download", "-s", self.name, remote, str(local))
+        for k in range(1, attempts + 1):
+            res = self._run("download", "-s", self.name, remote, str(local), check=False)
+            if res.returncode == 0:
+                return
+            print(f"[run_clips] download of {remote} failed (rc={res.returncode}), attempt {k}/{attempts}")
+            if k < attempts:
+                time.sleep(wait_s * k)
+        raise RuntimeError(f"colab download failed {attempts} times (rc={res.returncode}): {res.stderr.strip()[-500:]}")
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:

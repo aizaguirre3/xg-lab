@@ -165,3 +165,26 @@ def test_all_and_clips_are_exclusive_and_all_needs_the_zip_layout(tmp_path: Path
     args = rc.parse_args(["--all", "--hf-layout", "folders", "--ref", "x", "--out", str(tmp_path)])
     with pytest.raises(SystemExit):
         rc.run(args, runner=FakeColab(tmp_path))
+
+
+def test_a_transient_download_failure_is_retried_not_fatal(tmp_path: Path, monkeypatch):
+    rc = load_module("run_clips")
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.setattr(rc.time, "sleep", lambda s: None)
+
+    class Flaky(FakeColab):
+        def __init__(self, out_dir):
+            super().__init__(out_dir)
+            self.failed = 0
+
+        def __call__(self, cmd, stdin_text=None):
+            if len(cmd) > 1 and cmd[1] == "download" and self.failed < 2:
+                self.failed += 1
+                self.calls.append((list(cmd), stdin_text))
+                return load_module("run_clips").CmdResult(1, "", "")
+            return super().__call__(cmd, stdin_text)
+
+    fake = Flaky(tmp_path)
+    args = rc.parse_args(["--clips", "SNGS-021", "--ref", "abc", "--out", str(tmp_path / "out")])
+    assert rc.run(args, runner=fake) == 0
+    assert fake.failed == 2 and (tmp_path / "out" / "SNGS-021" / "Labels-GameState.json").exists()
