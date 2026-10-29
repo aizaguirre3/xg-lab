@@ -1417,18 +1417,13 @@ def match_lines(h_m2px: np.ndarray, lines: Sequence[ImageLine], model: PitchMode
 # ----------------------------------------------------------------------------
 
 
-def refine_homography(h_m2px: np.ndarray, lines: Sequence[ImageLine], matches: Sequence[LineMatch],
-                      model: PitchModel = DEFAULT_PITCH, width: int = 1920, height: int = 1080,
-                      ellipses: Sequence[ImageEllipse] = (), arc_matches: Sequence[ArcMatch] = (),
-                      arc_weight: float = 1.0) -> np.ndarray:
-    """Levenberg-Marquardt on the 8 free parameters: minimise the pixel distances of
-    the matched segments' endpoints and midpoints to the projected model lines and, for matched
-    ellipses, the Sampson distances of their points to the projected model circles (each ellipse
-    weighted like a line of its covered arc length)."""
-    from scipy.optimize import least_squares
-
+def _fit_residuals(lines: Sequence[ImageLine], matches: Sequence[LineMatch], model: PitchModel,
+                   ellipses: Sequence[ImageEllipse] = (), arc_matches: Sequence[ArcMatch] = (),
+                   arc_weight: float = 1.0):
+    """The weighted residual function of a metre -> pixel homography that the refinement minimises (see
+    :func:`refine_homography`), or None when nothing is matched."""
     if len(matches) == 0 and len(arc_matches) == 0:
-        return h_m2px
+        return None
     model_lines = {ln.name: ln for ln in model.lines()}
     circles = {c.name: c for c in _model_circles(model)}
     pts, mabc, wts = [], [], []
@@ -1453,18 +1448,8 @@ def refine_homography(h_m2px: np.ndarray, lines: Sequence[ImageLine], matches: S
     all_w = np.array(wts + arc_w)
     all_w = all_w / np.sqrt(np.mean(all_w ** 2))
     wts, arc_wts = all_w[:len(wts)], all_w[len(wts):]
-    s_px = np.diag([width, height, 1.0])
-    s_px_inv = np.linalg.inv(s_px)
-    s_m = np.diag([model.half_length, model.half_width, 1.0])
-    hn0 = s_px_inv @ h_m2px @ s_m  # normalised parametrisation
-    hn0 = hn0 / hn0[2, 2]
 
-    def unpack(p):
-        hn = np.array([[p[0], p[1], p[2]], [p[3], p[4], p[5]], [p[6], p[7], 1.0]])
-        return s_px @ hn @ np.linalg.inv(s_m)
-
-    def residuals(p):
-        h = unpack(p)
+    def residuals_h(h):
         with np.errstate(divide="ignore", invalid="ignore"):
             h_inv = np.linalg.inv(h)
         l_px = _normalise_lines(mabc @ h_inv)
@@ -1477,15 +1462,131 @@ def refine_homography(h_m2px: np.ndarray, lines: Sequence[ImageLine], matches: S
             r = np.concatenate([r, arc_wts * np.where(np.isfinite(d), d, 1e3)])
         return r
 
-    p0 = hn0.reshape(-1)[:8]
+    return residuals_h
+
+
+def _h_param(h_m2px: np.ndarray, width: int, height: int, model: PitchModel, camera: bool):
+    """``(theta0, to_h)``: a parametrisation of a metre -> pixel homography (the camera's seven parameters,
+    or the eight free entries of the normalised matrix) and the map back; None if ``camera`` and there
+    is no camera."""
+    if camera:
+        q0 = _camera_params(h_m2px, width, height)
+        if q0 is None:
+            return None
+        return q0, lambda q: _camera_h(q, width, height)
+    s_px = np.diag([width, height, 1.0])
+    s_m = np.diag([model.half_length, model.half_width, 1.0])
+    s_m_inv = np.linalg.inv(s_m)
+    hn0 = np.linalg.inv(s_px) @ h_m2px @ s_m  # normalised parametrisation
+    hn0 = hn0 / hn0[2, 2]
+    return hn0.reshape(-1)[:8], lambda p: s_px @ np.append(p, 1.0).reshape(3, 3) @ s_m_inv
+
+
+def refine_homography(h_m2px: np.ndarray, lines: Sequence[ImageLine], matches: Sequence[LineMatch],
+                      model: PitchModel = DEFAULT_PITCH, width: int = 1920, height: int = 1080,
+                      ellipses: Sequence[ImageEllipse] = (), arc_matches: Sequence[ArcMatch] = (),
+                      arc_weight: float = 1.0, camera: bool = False) -> np.ndarray:
+    """Levenberg-Marquardt on the 8 free parameters: minimise the pixel distances of
+    the matched segments' endpoints and midpoints to the projected model lines and, for matched
+    ellipses, the Sampson distances of their points to the projected model circles (each ellipse
+    weighted like a line of its covered arc length).
+
+    With ``camera`` the homography is refined as a pinhole camera instead (square pixels, principal
+    point at the image centre: focal length, rotation and position, seven parameters), which a real
+    broadcast camera is; a homography that does not decompose into such a camera is returned unrefined."""
+    from scipy.optimize import least_squares
+
+    residuals_h = _fit_residuals(lines, matches, model, ellipses, arc_matches, arc_weight)
+    if residuals_h is None:
+        return h_m2px
+    par = _h_param(h_m2px, width, height, model, camera)
+    if par is None:
+        return h_m2px
+    theta0, to_h = par
     try:
-        sol = least_squares(residuals, p0, method="lm", xtol=1e-12, ftol=1e-12, max_nfev=400)
-        h = unpack(sol.x)
+        sol = least_squares(lambda t: residuals_h(to_h(t)), theta0, method="lm", x_scale="jac" if camera else 1.0,
+                            xtol=1e-12, ftol=1e-12, max_nfev=400)
+        h = to_h(sol.x)
         if np.isfinite(h).all():
             return h / h[2, 2]
     except (ValueError, np.linalg.LinAlgError):
         pass
     return h_m2px
+
+
+def fit_uncertainty_m(h_m2px: np.ndarray, residuals_h, pts_px: np.ndarray, width: int, height: int,
+                      model: PitchModel = DEFAULT_PITCH, camera: bool = False, min_sigma_px: float = 0.5) -> np.ndarray:
+    """Standard error (metres) of the pitch position the fit gives each of ``pts_px``.
+
+    The parameter covariance is ``s^2 (J^T J)^-1`` at the solution (``J`` the Jacobian of the weighted
+    residuals, ``s`` their RMS with ``n - p`` degrees of freedom, at least ``min_sigma_px``), carried to
+    each point's back-projection with that point's own Jacobian. It is large where the markings that
+    fixed the fit say little: far from them, or along the one direction a near-degenerate set leaves
+    free. Infinite when the fit has no redundancy.
+    """
+    pts_px = np.asarray(pts_px, float).reshape(-1, 2)
+    par = _h_param(h_m2px, width, height, model, camera)
+    if par is None or residuals_h is None or len(pts_px) == 0:
+        return np.full(len(pts_px), np.inf)
+    theta, to_h = par
+    r0 = residuals_h(to_h(theta))
+    n, k = len(r0), len(theta)
+    if n <= k or not np.isfinite(r0).all():
+        return np.full(len(pts_px), np.inf)
+    steps = 1e-6 * np.maximum(np.abs(theta), 1e-3)
+
+    def back(t):
+        return apply_homography(np.linalg.inv(to_h(t)), pts_px).ravel()
+
+    m0 = back(theta)
+    jr = np.empty((n, k))
+    jm = np.empty((len(m0), k))
+    for i in range(k):
+        t = theta.copy()
+        t[i] += steps[i]
+        jr[:, i] = (residuals_h(to_h(t)) - r0) / steps[i]
+        jm[:, i] = (back(t) - m0) / steps[i]
+    s2 = max(float(r0 @ r0) / (n - k), min_sigma_px ** 2)
+    try:
+        cov = s2 * np.linalg.inv(jr.T @ jr)
+    except np.linalg.LinAlgError:
+        return np.full(len(pts_px), np.inf)
+    var = np.einsum("ij,jk,ik->i", jm, cov, jm).reshape(-1, 2).sum(axis=1)
+    return np.sqrt(np.clip(var, 0.0, None))
+
+
+def _camera_params(h_m2px: np.ndarray, width: int, height: int) -> Optional[np.ndarray]:
+    """``(f, rx, ry, rz, cx, cy, cz)``: focal length, Rodrigues rotation (pitch -> camera) and camera centre
+    (pitch frame, ``z`` into the ground) of the pinhole camera closest to ``h_m2px``; None if there is none."""
+    import cv2
+
+    t = np.array([[1.0, 0.0, -width / 2.0], [0.0, 1.0, -height / 2.0], [0.0, 0.0, 1.0]])
+    hh = t @ np.asarray(h_m2px, float)
+    f, _inc, _c = camera_from_homography(h_m2px, width, height)
+    if not np.isfinite(f):
+        return None
+    m = np.diag([1.0 / f, 1.0 / f, 1.0]) @ hh
+    lam = 2.0 / (np.linalg.norm(m[:, 0]) + np.linalg.norm(m[:, 1]))
+    m = m * lam
+    if m[2, 2] < 0:  # pitch in front of the camera
+        m = -m
+    r = np.stack([m[:, 0], m[:, 1], np.cross(m[:, 0], m[:, 1])], axis=1)
+    u, _s, vt = np.linalg.svd(r)
+    r = u @ vt
+    if np.linalg.det(r) < 0:
+        return None
+    rvec, _ = cv2.Rodrigues(r)
+    centre = -r.T @ m[:, 2]
+    return np.concatenate([[f], rvec.ravel(), centre])
+
+
+def _camera_h(q: np.ndarray, width: int, height: int) -> np.ndarray:
+    """Metre -> pixel homography of the camera ``q`` (see :func:`_camera_params`)."""
+    import cv2
+
+    r, _ = cv2.Rodrigues(np.asarray(q[1:4], float).reshape(3, 1))
+    k = np.array([[q[0], 0.0, width / 2.0], [0.0, q[0], height / 2.0], [0.0, 0.0, 1.0]])
+    return k @ np.stack([r[:, 0], r[:, 1], -r @ np.asarray(q[4:7], float)], axis=1)
 
 
 def _errors(h_m2px: np.ndarray, lines: Sequence[ImageLine], matches: Sequence[LineMatch],
@@ -1571,19 +1672,27 @@ def camera_from_homography(h_m2px: np.ndarray, width: int, height: int) -> Tuple
 
 @dataclass(frozen=True)
 class VerifyConfig:
-    """When a solution is refused (see :func:`verify_solution`). The defaults were set on 225 frames of 15
-    SoccerNet GSR *train* clips; the validation clips were not looked at."""
+    """When a solution is refused (see :func:`verify_solution` and :func:`verify_failures`).
+
+    The defaults were chosen on 225 frames (every 50th) of 15 SoccerNet GSR *train* clips, with the
+    labelled person boxes as the people mask; the validation clips were not looked at. There they kept
+    79 of 168 solutions, 75 of them within 1 m of the labels (precision 0.95), and refused all 29 that
+    were over 5 m wrong.
+    """
 
     min_support: float = 0.0
     max_missing: int = 99
-    max_unexplained: float = 1.0
-    max_loo_shift_m: float = float("inf")
+    max_unexplained: float = 0.3
+    max_loo_shift_m: float = 5.0
     max_critical: int = 99
-    max_inconsistency: float = float("inf")
+    max_inconsistency: float = 0.2
+    max_sigma_people_m: float = 0.12
+    max_sigma_grid_m: float = 0.5  # used instead when no person boxes are given
     focal_range: Tuple[float, float] = (0.3, 8.0)  # in frame widths
     camera_box: Tuple[Tuple[float, float], Tuple[float, float], Tuple[float, float]] = (
-        (-70.0, 70.0), (10.0, 150.0), (1.0, 60.0))  # camera centre x, y, z in pitch metres (GSR: main camera, +y side)
+        (-70.0, 70.0), (15.0, 150.0), (3.0, 50.0))  # camera centre x, y, height in pitch metres (GSR: main camera, +y side)
     enabled: bool = True
+    refuse: bool = True  # False: record the evidence, refuse nothing
 
 
 def _marking_elements(model: PitchModel, step_m: float = 0.5) -> Tuple[np.ndarray, np.ndarray, List[str]]:
@@ -1613,7 +1722,8 @@ _ELEMENTS: Dict[int, Tuple[np.ndarray, np.ndarray, List[str]]] = {}
 def verify_solution(h_m2px: np.ndarray, mask: np.ndarray, grass: np.ndarray, lines: Sequence[ImageLine],
                     matches: Sequence[LineMatch], ellipses: Sequence[ImageEllipse], arc_matches: Sequence[ArcMatch],
                     model: PitchModel = DEFAULT_PITCH, person_boxes: Optional[np.ndarray] = None,
-                    min_inliers: int = 4, reach_px: Optional[float] = None, with_loo: bool = True) -> Dict[str, object]:
+                    min_inliers: int = 4, reach_px: Optional[float] = None, with_loo: bool = True,
+                    arc_weight: float = 1.0, camera: bool = False) -> Dict[str, object]:
     """Evidence for and against a solution, from the frame itself.
 
     * ``support``: share of the model's marking points in view (inside the grass, outside the people) that
@@ -1626,6 +1736,8 @@ def verify_solution(h_m2px: np.ndarray, mask: np.ndarray, grass: np.ndarray, lin
       which the rest no longer fixes the homography. Independent subsets of a right solution agree.
     * ``focal_ratio`` (focal length in frame widths), ``inconsistency`` and ``camera`` (centre x, y, z),
       from :func:`camera_from_homography`.
+    * ``sigma_grid_m``: the 90th percentile of the fit's standard error (:func:`fit_uncertainty_m`) over a
+      grid of the visible pitch; ``sigma_people_m``: the median over the feet of ``person_boxes``.
     """
     import cv2
 
@@ -1668,15 +1780,22 @@ def verify_solution(h_m2px: np.ndarray, mask: np.ndarray, grass: np.ndarray, lin
     out["focal_ratio"] = float(f / w) if np.isfinite(f) else float("nan")
     out["inconsistency"] = float(inc)
     out["camera"] = None if cc is None else [round(float(v), 2) for v in cc]
+    gx, gy = np.meshgrid(np.linspace(0.05, 0.95, 12) * w, np.linspace(0.1, 0.95, 8) * h)
+    grid = np.stack([gx.ravel(), gy.ravel()], axis=1)
+    gi = np.round(grid).astype(np.int64)
+    grid = grid[grass[gi[:, 1], gi[:, 0]] > 0]
+    h_inv = np.linalg.inv(h_m2px)
+    base = apply_homography(h_inv, grid)
+    on = model.contains(base, margin=5.0) if len(grid) else np.zeros(0, bool)
+    grid, base = grid[on], base[on]
+    res_fn = _fit_residuals(lines, matches, model, ellipses, arc_matches, arc_weight)
+    sg = fit_uncertainty_m(h_m2px, res_fn, grid, w, h, model, camera) if len(grid) else np.array([np.inf])
+    out["sigma_grid_m"] = float(np.percentile(sg, 90))
+    if person_boxes is not None and len(person_boxes):
+        b = np.asarray(person_boxes, float).reshape(-1, 4)
+        sp = fit_uncertainty_m(h_m2px, res_fn, np.stack([(b[:, 0] + b[:, 2]) / 2, b[:, 3]], axis=1), w, h, model, camera)
+        out["sigma_people_m"] = float(np.median(sp))
     if with_loo:
-        gx, gy = np.meshgrid(np.linspace(0.05, 0.95, 12) * w, np.linspace(0.1, 0.95, 8) * h)
-        grid = np.stack([gx.ravel(), gy.ravel()], axis=1)
-        gi = np.round(grid).astype(np.int64)
-        grid = grid[grass[gi[:, 1], gi[:, 0]] > 0]
-        h_inv = np.linalg.inv(h_m2px)
-        base = apply_homography(h_inv, grid)
-        on = model.contains(base, margin=5.0) if len(grid) else np.zeros(0, bool)
-        grid, base = grid[on], base[on]
         worst, critical = 0.0, 0
         names = sorted({m.model_name for m in matches}) + sorted({a.model_name for a in arc_matches})
         for name in names:
@@ -1687,7 +1806,8 @@ def verify_solution(h_m2px: np.ndarray, mask: np.ndarray, grass: np.ndarray, lin
                 continue
             if len(grid) == 0:
                 continue
-            h2 = refine_homography(h_m2px, lines, m2, model, width=w, height=h, ellipses=ellipses, arc_matches=a2)
+            h2 = refine_homography(h_m2px, lines, m2, model, width=w, height=h, ellipses=ellipses, arc_matches=a2,
+                                   arc_weight=arc_weight, camera=camera)
             try:
                 moved = np.linalg.norm(apply_homography(np.linalg.inv(h2), grid) - base, axis=1)
             except np.linalg.LinAlgError:
@@ -1716,6 +1836,11 @@ def verify_failures(v: Dict[str, object], cfg: VerifyConfig, width: int) -> List
         why.append(f"focal length {fr:.2f} frame widths")
     if v["inconsistency"] > cfg.max_inconsistency:
         why.append(f"camera inconsistency {v['inconsistency']:.2f}")
+    if "sigma_people_m" in v:
+        if not v["sigma_people_m"] <= cfg.max_sigma_people_m:
+            why.append(f"standard error at the people {v['sigma_people_m']:.2f} m")
+    elif not v.get("sigma_grid_m", 0.0) <= cfg.max_sigma_grid_m:
+        why.append(f"standard error over the pitch {v['sigma_grid_m']:.2f} m")
     cam = v["camera"]
     if cam is None or not all(lo <= c <= hi for c, (lo, hi) in zip(cam, cfg.camera_box)):
         why.append(f"camera at {cam}")
@@ -1736,7 +1861,8 @@ def calibrate_frame(frame_bgr: np.ndarray, model: PitchModel = DEFAULT_PITCH, pr
                     extra_priors: Sequence[np.ndarray] = (), min_tracked_inliers: int = 0,
                     person_boxes: Optional[np.ndarray] = None, mask: str = "contrast",
                     use_arcs: bool = True, ellipse_kw: Optional[dict] = None,
-                    verify: Optional[VerifyConfig] = None, arc_weight: float = 0.3) -> CalibrationResult:
+                    verify: Optional[VerifyConfig] = None, arc_weight: float = 0.3,
+                    camera_fit: bool = True) -> CalibrationResult:
     """Calibrate one frame from scratch, or from ``prior_m2px`` (tracking) with a
     global search as the fallback. ``extra_priors`` are tried after ``prior_m2px``
     (for instance the previous solution when the first prior is an extrapolation)
@@ -1789,6 +1915,10 @@ def calibrate_frame(frame_bgr: np.ndarray, model: PitchModel = DEFAULT_PITCH, pr
             aw = arc_weight if _families_ok(matches, model, min_inliers) else 1.0
             hh = refine_homography(hh, lines, matches, model, width=w, height=h, ellipses=ellipses, arc_matches=arcs,
                                    arc_weight=aw)
+            incons = camera_from_homography(hh, w, h)[1]  # how far the free fit is from a camera
+            if camera_fit:
+                hh = refine_homography(hh, lines, matches, model, width=w, height=h, ellipses=ellipses,
+                                       arc_matches=arcs, arc_weight=aw, camera=True)
         matches = match_lines(hh, lines, model, tau_px=tau)
         arcs = match_arcs(hh, ellipses, model, tau_px=tau)
         if not _families_ok(matches, model, min_inliers, arcs):
@@ -1801,8 +1931,10 @@ def calibrate_frame(frame_bgr: np.ndarray, model: PitchModel = DEFAULT_PITCH, pr
                                 arc_matches=arcs)
         if cfg.enabled:
             res.verify = verify_solution(hh, mpx, grass, lines, matches, ellipses, arcs, model, person_boxes,
-                                         min_inliers=min_inliers)
-            why = verify_failures(res.verify, cfg, w)
+                                         min_inliers=min_inliers, camera=camera_fit,
+                                         arc_weight=arc_weight if _families_ok(matches, model, min_inliers) else 1.0)
+            res.verify["inconsistency"] = float(incons)
+            why = verify_failures(res.verify, cfg, w) if cfg.refuse else []
             if why:
                 refused.append((status, why, res.verify))
                 return None
