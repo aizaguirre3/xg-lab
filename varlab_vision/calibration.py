@@ -1278,7 +1278,8 @@ def _circle_hypotheses(lines: Sequence[ImageLine], cand: Sequence[int], ellipses
 def search_homography(lines: Sequence[ImageLine], width: int, height: int, model: PitchModel = DEFAULT_PITCH,
                       tau_px: Optional[float] = None, tol_m: float = 2.0, top_k: int = 6, n_score: int = 10,
                       n_rescore: int = 64, chunk: int = 40000,
-                      ellipses: Sequence[ImageEllipse] = ()) -> Tuple[Optional[np.ndarray], List[LineMatch], float]:
+                      ellipses: Sequence[ImageEllipse] = (), ranked: Optional[List[Tuple[float, np.ndarray]]] = None
+                      ) -> Tuple[Optional[np.ndarray], List[LineMatch], float]:
     """Global search: assign four image lines to two x = const and two y = const
     model lines, solve the homography from their four intersections, score on all
     lines; returns ``(H_m2px, matches, score)`` or ``(None, [], 0)``.
@@ -1286,6 +1287,8 @@ def search_homography(lines: Sequence[ImageLine], width: int, height: int, model
     With ``ellipses`` (see :func:`detect_ellipses`), hypotheses from the centre circle, the halfway
     line and a touchline are added (:func:`_circle_hypotheses`; they need only two lines), and every
     hypothesis that reaches the final scoring is also scored on the ellipses (:func:`_score_arcs`).
+    A list passed as ``ranked`` receives every positively scored hypothesis of that final scoring as
+    ``(score, H_m2px)``, best first.
     """
     if len(lines) < 4 and not (ellipses and len(lines) >= 2):
         return None, [], 0.0
@@ -1373,6 +1376,8 @@ def search_homography(lines: Sequence[ImageLine], width: int, height: int, model
         arc_score, _ab, _ai, _am = _score_arcs(hs, ellipses, model, tau)
         full = np.where(full >= 0, full + arc_score, full)
     b = int(np.argmax(full))
+    if ranked is not None:
+        ranked.extend((float(full[i]), hs[i]) for i in np.argsort(-full) if full[i] > 0)
     if full[b] <= 0:
         return None, [], 0.0
     best_h = hs[b]
@@ -1790,11 +1795,11 @@ def verify_solution(h_m2px: np.ndarray, mask: np.ndarray, grass: np.ndarray, lin
     grid, base = grid[on], base[on]
     res_fn = _fit_residuals(lines, matches, model, ellipses, arc_matches, arc_weight)
     sg = fit_uncertainty_m(h_m2px, res_fn, grid, w, h, model, camera) if len(grid) else np.array([np.inf])
-    out["sigma_grid_m"] = float(np.percentile(sg, 90))
+    out["sigma_grid_m"] = float(np.percentile(sg, 90)) if np.isfinite(sg).all() else float("inf")
     if person_boxes is not None and len(person_boxes):
         b = np.asarray(person_boxes, float).reshape(-1, 4)
         sp = fit_uncertainty_m(h_m2px, res_fn, np.stack([(b[:, 0] + b[:, 2]) / 2, b[:, 3]], axis=1), w, h, model, camera)
-        out["sigma_people_m"] = float(np.median(sp))
+        out["sigma_people_m"] = float(np.median(sp)) if np.isfinite(sp).all() else float("inf")
     if with_loo:
         worst, critical = 0.0, 0
         names = sorted({m.model_name for m in matches}) + sorted({a.model_name for a in arc_matches})
@@ -1862,7 +1867,7 @@ def calibrate_frame(frame_bgr: np.ndarray, model: PitchModel = DEFAULT_PITCH, pr
                     person_boxes: Optional[np.ndarray] = None, mask: str = "contrast",
                     use_arcs: bool = True, ellipse_kw: Optional[dict] = None,
                     verify: Optional[VerifyConfig] = None, arc_weight: float = 0.3,
-                    camera_fit: bool = True) -> CalibrationResult:
+                    camera_fit: bool = True, max_alternatives: int = 3) -> CalibrationResult:
     """Calibrate one frame from scratch, or from ``prior_m2px`` (tracking) with a
     global search as the fallback. ``extra_priors`` are tried after ``prior_m2px``
     (for instance the previous solution when the first prior is an extrapolation)
@@ -1946,13 +1951,27 @@ def calibrate_frame(frame_bgr: np.ndarray, model: PitchModel = DEFAULT_PITCH, pr
         res = finish(prior, STATUS_TRACKED, "tracked from the previous frame")
         if res is not None and res.n_inliers >= min_tracked_inliers:
             return res
-    h_best, matches, score = search_homography(lines, w, h, model, tau_px=tau, ellipses=ellipses)
+    ranked: List[Tuple[float, np.ndarray]] = []
+    h_best, matches, score = search_homography(lines, w, h, model, tau_px=tau, ellipses=ellipses, ranked=ranked)
     arcs = match_arcs(h_best, ellipses, model, tau_px=tau) if h_best is not None else []
     if h_best is None or not _families_ok(matches, model, min_inliers, arcs):
         return CalibrationResult(status=STATUS_UNCALIBRATED, n_lines=len(lines), lines=lines, ellipses=ellipses,
                                  note=f"global search: {len(matches)} consistent lines and {len(arcs)} curves, "
                                       f"need {min_inliers} lines across both families or a curve and a line of each")
-    res = finish(h_best, STATUS_CALIBRATED, f"global search over {len(lines)} lines and {len(ellipses)} curves")
+    note = f"global search over {len(lines)} lines and {len(ellipses)} curves"
+    res = finish(h_best, STATUS_CALIBRATED, note)
+    # A refused best hypothesis may have beaten a right one on the score: try the next distinct ones
+    # (those that are not within the matching tolerance of one already tried, at the image anchors).
+    tried = [h_best]
+    for _score, h_alt in ranked:
+        if res is not None or len(tried) > max_alternatives:
+            break
+        if any(homography_shift_px(t, h_alt, w, h) <= 2.0 * tau for t in tried):
+            continue
+        tried.append(h_alt)
+        m_alt = match_lines(h_alt, lines, model, tau_px=tau)
+        if _families_ok(m_alt, model, min_inliers, match_arcs(h_alt, ellipses, model, tau_px=tau)):
+            res = finish(h_alt, STATUS_CALIBRATED, note + f" (hypothesis {len(tried)})")
     if res is None:
         last = refused[-1] if refused and refused[-1][0] == STATUS_CALIBRATED else None
         return CalibrationResult(status=STATUS_UNCALIBRATED, n_lines=len(lines), lines=lines, ellipses=ellipses,
