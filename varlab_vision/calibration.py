@@ -863,12 +863,14 @@ def _refine_ellipse(pts: np.ndarray, centre: np.ndarray, axes: np.ndarray, angle
 
 def detect_ellipses(mask: np.ndarray, lines: Sequence[ImageLine] = (), max_ellipses: int = 3, min_pixels: int = 60,
                     min_span_deg: float = 90.0, max_rms_px: float = 1.5, straight_len_px: float = 120.0,
-                    straight_bend_px: float = 0.5, n_points: int = 72) -> List[ImageEllipse]:
+                    straight_bend_px: float = 0.5, long_len_px: Optional[float] = None, n_points: int = 72,
+                    min_axis_ratio: float = 0.08) -> List[ImageEllipse]:
     """Ellipses through the curved marking pixels: the centre circle and the penalty arcs as the camera sees them.
 
-    The confidently straight markings (``lines`` at least ``straight_len_px`` long that bow by at most
-    ``straight_bend_px``) are erased first, which cuts the centre circle free of the halfway line it
-    crosses. Every remaining connected piece of at least ``min_pixels`` pixels then seeds an ellipse
+    The confidently straight markings are erased first, which cuts the centre circle free of the halfway
+    line it crosses: ``lines`` at least ``straight_len_px`` long that bow by at most ``straight_bend_px``,
+    and every line of at least ``long_len_px`` (default a quarter of the frame width; lens distortion
+    bows a long line by a pixel or more, a circle never yields a straight piece that long). Every remaining connected piece of at least ``min_pixels`` pixels then seeds an ellipse
     (OpenCV's direct least-squares fit), which is grown over the remaining pixels within a Sampson
     distance of about the stroke half-width plus two pixels and refitted, three times: a circle cut
     into pieces by the halfway line and by players comes back as one ellipse. An ellipse is kept when
@@ -876,7 +878,8 @@ def detect_ellipses(mask: np.ndarray, lines: Sequence[ImageLine] = (), max_ellip
     does not fix a conic), fit it within ``max_rms_px`` or 0.6 times the stroke half-width plus half a pixel,
     whichever is larger (a filled stroke of half-width ``w`` alone has an RMS of ``w / sqrt(3)``: the
     near side of a centre circle measured 1.7 px), and it is not degenerate (major semi-axis at least
-    40 px, minor at least 6 px and 0.08 of the major: thinner ellipses are fits to a straight piece;
+    40 px, minor at least 6 px and ``min_axis_ratio`` of the major: thinner ellipses are fits to a
+    straight piece;
     centre within a frame size of the image). Its pixels are then taken out of the pool
     and the next seed is tried, up to ``max_ellipses``. Each ellipse carries ``n_points`` points
     on the fitted curve, spread over the parts its pixels cover, for the homography search and fit.
@@ -884,11 +887,13 @@ def detect_ellipses(mask: np.ndarray, lines: Sequence[ImageLine] = (), max_ellip
     import cv2
 
     h, w = mask.shape[:2]
+    if long_len_px is None:
+        long_len_px = 0.25 * w
     res = mask.copy()
     hws = [ln.half_width_px for ln in lines if np.isfinite(ln.half_width_px)]
     half_w = float(np.median(hws)) if hws else 1.5
     for ln in lines:
-        if ln.length >= straight_len_px and ln.bend_px <= straight_bend_px:
+        if ln.length >= long_len_px or (ln.length >= straight_len_px and ln.bend_px <= straight_bend_px):
             hw = ln.half_width_px if np.isfinite(ln.half_width_px) else half_w
             cv2.line(res, tuple(int(round(v)) for v in ln.p0), tuple(int(round(v)) for v in ln.p1), 0,
                      thickness=int(2 * math.ceil(hw) + 3))
@@ -928,7 +933,7 @@ def detect_ellipses(mask: np.ndarray, lines: Sequence[ImageLine] = (), max_ellip
         centre, axes, ang = _refine_ellipse(pool[sel], *ell)
         if axes[1] > axes[0]:  # major axis first
             axes, ang = axes[::-1].copy(), ang + 90.0
-        if (axes[1] / axes[0] < 0.08 or axes[1] < 6.0 or axes[0] < 40.0 or axes[0] > 3.0 * w
+        if (axes[1] / axes[0] < min_axis_ratio or axes[1] < 6.0 or axes[0] < 40.0 or axes[0] > 3.0 * w
                 or not (-w <= centre[0] <= 2 * w) or not (-h <= centre[1] <= 2 * h)):
             continue
         conic = ellipse_conic(centre, axes, ang)
@@ -952,12 +957,17 @@ def detect_ellipses(mask: np.ndarray, lines: Sequence[ImageLine] = (), max_ellip
     return out
 
 
-def drop_chords(lines: Sequence[ImageLine], ellipses: Sequence[ImageEllipse], tol_px: float = 2.5) -> List[ImageLine]:
-    """The lines that do not lie along one of the ``ellipses`` (a straight piece cut out of a curve is not a line)."""
+def drop_chords(lines: Sequence[ImageLine], ellipses: Sequence[ImageEllipse], tol_px: float = 2.5,
+                max_len_px: float = float("inf")) -> List[ImageLine]:
+    """The lines that do not lie along one of the ``ellipses`` (a straight piece cut out of a curve is not a
+    line); lines of at least ``max_len_px`` are kept whatever they touch."""
     if not ellipses:
         return list(lines)
     out = []
     for ln in lines:
+        if ln.length >= max_len_px:
+            out.append(ln)
+            continue
         s = ln.p0 + np.outer(np.linspace(0.0, 1.0, 9), ln.p1 - ln.p0)
         hw = ln.half_width_px if np.isfinite(ln.half_width_px) else 1.5
         if any(float(conic_distance(e.conic, s).max()) <= tol_px + hw for e in ellipses):
@@ -1065,6 +1075,36 @@ def _distinct_lines(lines: Sequence[ImageLine], k: int, width: int) -> List[int]
             if len(chosen) == k:
                 break
     return chosen
+
+
+def _camera_ok_batch(h_m2px: np.ndarray, width: int, height: int, focal_range: Tuple[float, float],
+                     camera_box) -> np.ndarray:
+    """(B,) whether each metre -> pixel homography decomposes into a camera (as in
+    :func:`camera_from_homography`) with a focal length in ``focal_range`` frame widths and its centre
+    (x, y, height) inside ``camera_box``."""
+    t = np.array([[1.0, 0.0, -width / 2.0], [0.0, 1.0, -height / 2.0], [0.0, 0.0, 1.0]])
+    hh = np.einsum("ij,bjk->bik", t, np.asarray(h_m2px, float))
+    with np.errstate(all="ignore"):
+        hh = hh / np.linalg.norm(hh, axis=(1, 2))[:, None, None]
+        h1, h2, h3 = hh[:, :, 0], hh[:, :, 1], hh[:, :, 2]
+        a0 = h1[:, 0] * h2[:, 0] + h1[:, 1] * h2[:, 1]
+        a1 = h1[:, 0] ** 2 + h1[:, 1] ** 2 - h2[:, 0] ** 2 - h2[:, 1] ** 2
+        b0 = -h1[:, 2] * h2[:, 2]
+        b1 = -(h1[:, 2] ** 2 - h2[:, 2] ** 2)
+        inv_f2 = (a0 * b0 + a1 * b1) / (a0 * a0 + a1 * a1)
+        f = 1.0 / np.sqrt(inv_f2)
+        ok = np.isfinite(f) & (inv_f2 > 0) & (f >= focal_range[0] * width) & (f <= focal_range[1] * width)
+        k = np.stack([1.0 / f, 1.0 / f, np.ones_like(f)], axis=1)  # diagonal of K^-1
+        r1, r2, tt = h1 * k, h2 * k, h3 * k
+        lam = 2.0 / (np.linalg.norm(r1, axis=1) + np.linalg.norm(r2, axis=1))
+        sgn = np.where(tt[:, 2] * lam < 0, -1.0, 1.0) * lam
+        r1, r2, tt = r1 * sgn[:, None], r2 * sgn[:, None], tt * sgn[:, None]
+        rot = np.stack([r1, r2, np.cross(r1, r2)], axis=2)  # columns r1, r2, r3
+        centre = -np.einsum("bji,bj->bi", rot, tt)
+        cam = np.stack([centre[:, 0], centre[:, 1], -centre[:, 2]], axis=1)
+        for i, (lo, hi) in enumerate(camera_box):
+            ok &= (cam[:, i] >= lo) & (cam[:, i] <= hi)
+    return ok & np.isfinite(cam).all(axis=1)
 
 
 @dataclass(frozen=True)
@@ -1291,8 +1331,8 @@ def _circle_hypotheses(lines: Sequence[ImageLine], cand: Sequence[int], ellipses
 def search_homography(lines: Sequence[ImageLine], width: int, height: int, model: PitchModel = DEFAULT_PITCH,
                       tau_px: Optional[float] = None, tol_m: float = 2.0, top_k: int = 6, n_score: int = 10,
                       n_rescore: int = 64, chunk: int = 40000,
-                      ellipses: Sequence[ImageEllipse] = (), ranked: Optional[List[Tuple[float, np.ndarray]]] = None
-                      ) -> Tuple[Optional[np.ndarray], List[LineMatch], float]:
+                      ellipses: Sequence[ImageEllipse] = (), ranked: Optional[List[Tuple[float, np.ndarray]]] = None,
+                      camera_prior: Optional["VerifyConfig"] = None) -> Tuple[Optional[np.ndarray], List[LineMatch], float]:
     """Global search: assign four image lines to two x = const and two y = const
     model lines, solve the homography from their four intersections, score on all
     lines; returns ``(H_m2px, matches, score)`` or ``(None, [], 0)``.
@@ -1301,7 +1341,9 @@ def search_homography(lines: Sequence[ImageLine], width: int, height: int, model
     line and a touchline are added (:func:`_circle_hypotheses`; they need only two lines), and every
     hypothesis that reaches the final scoring is also scored on the ellipses (:func:`_score_arcs`).
     A list passed as ``ranked`` receives every positively scored hypothesis of that final scoring as
-    ``(score, H_m2px)``, best first.
+    ``(score, H_m2px)``, best first. With ``camera_prior`` (a :class:`VerifyConfig`), a hypothesis no
+    camera in its ``focal_range`` and ``camera_box`` could produce scores nothing: verification would
+    refuse it anyway, and on broadcast frames such hypotheses often outscore the right one.
     """
     if len(lines) < 4 and not (ellipses and len(lines) >= 2):
         return None, [], 0.0
@@ -1366,6 +1408,9 @@ def search_homography(lines: Sequence[ImageLine], width: int, height: int, model
             h = h / h[:, 2:3, 2:3]
         score, _best, _inl = _score_hypotheses(h, score_lines, model_abc, intervals, model_kind, tau, tol_m,
                                                half_width=model.half_width, image_centre=(width / 2.0, height / 2.0))
+        if camera_prior is not None:
+            score = np.where(_camera_ok_batch(h, width, height, camera_prior.focal_range, camera_prior.camera_box),
+                             score, -1.0)
         top = np.argsort(-score)[:n_rescore]
         leaders.extend((float(score[b]), h[b].copy()) for b in top if score[b] > 0)
     leaders.sort(key=lambda t: -t[0])
@@ -1388,6 +1433,9 @@ def search_homography(lines: Sequence[ImageLine], width: int, height: int, model
     if ellipses:
         arc_score, _ab, _ai, _am = _score_arcs(hs, ellipses, model, tau)
         full = np.where(full >= 0, full + arc_score, full)
+    if camera_prior is not None:
+        full = np.where(_camera_ok_batch(hs, width, height, camera_prior.focal_range, camera_prior.camera_box),
+                        full, -1.0)
     b = int(np.argmax(full))
     if ranked is not None:
         ranked.extend((float(full[i]), hs[i]) for i in np.argsort(-full) if full[i] > 0)
@@ -1693,9 +1741,9 @@ class VerifyConfig:
     """When a solution is refused (see :func:`verify_solution` and :func:`verify_failures`).
 
     The defaults were chosen on 225 frames (every 50th) of 15 SoccerNet GSR *train* clips, with the
-    labelled person boxes as the people mask; the validation clips were not looked at. There they kept
-    79 of 168 solutions, 75 of them within 1 m of the labels (precision 0.95), and refused all 29 that
-    were over 5 m wrong.
+    labelled person boxes as the people mask. There the calibrator claims 89 frames, 83 of them within
+    1 m of the labels (precision 0.93) and none over 5 m; without the refusals it claimed 168 with 29
+    over 5 m. The same box (``focal_range``, ``camera_box``) also prunes the global search.
     """
 
     min_support: float = 0.0
@@ -1704,7 +1752,7 @@ class VerifyConfig:
     max_loo_shift_m: float = 5.0
     max_critical: int = 99
     max_inconsistency: float = 0.2
-    max_sigma_people_m: float = 0.12
+    max_sigma_people_m: float = 0.11
     max_sigma_grid_m: float = 0.5  # used instead when no person boxes are given
     focal_range: Tuple[float, float] = (0.3, 8.0)  # in frame widths
     camera_box: Tuple[Tuple[float, float], Tuple[float, float], Tuple[float, float]] = (
@@ -1880,7 +1928,7 @@ def calibrate_frame(frame_bgr: np.ndarray, model: PitchModel = DEFAULT_PITCH, pr
                     person_boxes: Optional[np.ndarray] = None, mask: str = "contrast",
                     use_arcs: bool = True, ellipse_kw: Optional[dict] = None,
                     verify: Optional[VerifyConfig] = None, arc_weight: float = 0.3,
-                    camera_fit: bool = True, max_alternatives: int = 3) -> CalibrationResult:
+                    camera_fit: bool = True, max_alternatives: int = 3, search_camera_prior: bool = True) -> CalibrationResult:
     """Calibrate one frame from scratch, or from ``prior_m2px`` (tracking) with a
     global search as the fallback. ``extra_priors`` are tried after ``prior_m2px``
     (for instance the previous solution when the first prior is an extrapolation)
@@ -1922,7 +1970,7 @@ def calibrate_frame(frame_bgr: np.ndarray, model: PitchModel = DEFAULT_PITCH, pr
                **(line_kw or {})}
     lines = extract_lines(mpx, **line_kw)
     ellipses = detect_ellipses(mpx, lines, **(ellipse_kw or {})) if use_arcs else []
-    lines = drop_chords(lines, ellipses)
+    lines = drop_chords(lines, ellipses, max_len_px=0.25 * w)
     if len(lines) < 4 and not (ellipses and len(lines) >= 2):
         return CalibrationResult(status=STATUS_UNCALIBRATED, n_lines=len(lines), lines=lines, ellipses=ellipses,
                                  note=f"{len(lines)} straight markings and {len(ellipses)} curves found, need 4 lines "
@@ -1970,7 +2018,8 @@ def calibrate_frame(frame_bgr: np.ndarray, model: PitchModel = DEFAULT_PITCH, pr
         if res is not None and res.n_inliers >= min_tracked_inliers:
             return res
     ranked: List[Tuple[float, np.ndarray]] = []
-    h_best, matches, score = search_homography(lines, w, h, model, tau_px=tau, ellipses=ellipses, ranked=ranked)
+    h_best, matches, score = search_homography(lines, w, h, model, tau_px=tau, ellipses=ellipses, ranked=ranked,
+                                               camera_prior=cfg if (cfg.enabled and cfg.refuse and search_camera_prior) else None)
     arcs = match_arcs(h_best, ellipses, model, tau_px=tau) if h_best is not None else []
     if h_best is None or not _families_ok(matches, model, min_inliers, arcs):
         return CalibrationResult(status=STATUS_UNCALIBRATED, n_lines=len(lines), lines=lines, ellipses=ellipses,

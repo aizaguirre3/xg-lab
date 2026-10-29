@@ -207,6 +207,21 @@ def test_camera_from_homography_recovers_the_camera():
     assert incons2 > 0.1
 
 
+def test_the_search_camera_prior_agrees_with_the_decomposition():
+    """The batched test the search applies keeps real main cameras under any scale or sign of H and drops
+    mirrored ones and cameras behind the goal or below the pitch."""
+    cams = [wide_camera(W, H), _centre_camera(),
+            BroadcastCamera(width=W, height=H, hfov_deg=30.0, position=(5.0, 60.0, 12.0), look_at=(-20.0, 3.0))]
+    hs = [c.homography_m2px() * k for c in cams for k in (1.0, -2.5)]
+    cfg = cal.DEFAULT_VERIFY
+    assert cal._camera_ok_batch(np.array(hs), W, H, cfg.focal_range, cfg.camera_box).all()
+    bad = [cams[0].homography_m2px() @ np.diag([-1.0, 1.0, 1.0]),  # mirrored
+           BroadcastCamera(width=W, height=H, hfov_deg=40.0, position=(80.0, 0.0, 15.0),
+                           look_at=(30.0, 0.0)).homography_m2px(),  # behind a goal
+           cams[1].homography_m2px() @ np.diag([1.0, 3.0, 1.0])]  # no camera
+    assert not cal._camera_ok_batch(np.array(bad), W, H, cfg.focal_range, cfg.camera_box).any()
+
+
 def test_camera_refinement_keeps_a_camera_homography():
     cam = _centre_camera()
     q = cal._camera_params(cam.homography_m2px(), W, H)
