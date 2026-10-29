@@ -56,9 +56,10 @@ back-projected, to the model lines: how the pixel error looks on the pitch).
 
 Limits, stated once: single camera, planar pitch (no height, no lens distortion), a
 broadcast main camera on the ``+y`` side (the verification's camera prior), and a view
-that shows enough markings. On SoccerNet GSR frames (``tools/eval_gsr_calibration.py``,
-numbers in ``analysis/vision_env.md``) the calibrator claims about a third of the frames
-and most of those are within a metre of the labels; the rest it refuses.
+that shows enough markings. On every 50th frame of the 58 SoccerNet GSR validation clips
+(``tools/eval_gsr_calibration.py``, numbers in ``analysis/vision_env.md``) it claims 40% of
+the frames, 97% of those with a median error under 1 m against the labels and none over
+5 m, and refuses the rest.
 """
 from __future__ import annotations
 

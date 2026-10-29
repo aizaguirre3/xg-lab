@@ -305,7 +305,7 @@ straight lines only, cuts the circle into straight chords that it then matches
 as markings, reads white shirts as marking pixels, and misses faint distant
 lines with its fixed brightness threshold. On a full tracked clip (SNGS-021,
 750 frames) the median error was 46 m. Until this is fixed the calibrator should
-stay off for real clips (`--no-calibration`).
+stay off for real clips (`--no-calibration`). (Reworked on 2026-10-29: see "Calibration on broadcast frames" below.)
 
 **Next, in order of what the numbers say:** (1) calibration: mask out detected
 people, find marking pixels by local contrast (white top-hat) inside the grass
@@ -315,6 +315,171 @@ solution instead of reporting a wrong one; (2) tracking: re-identification or a
 longer ByteTrack buffer to cut the 2.2x fragmentation; (3) a role classifier for
 goalkeepers and referees and a better team split; (4) jersey recognition, which
 GS-HOTA needs. Per-clip numbers: `analysis/gsr_valid_2026-10-26.json`.
+
+## Calibration on broadcast frames (2026-10-29)
+
+The 2026-10-26 run showed the calibration guessing on real frames: 30% of the
+sampled validation frames calibrated, 216 of the 260 with labelled people over
+5 m wrong, 3.1% of the labelled people within 1 m. Four changes, each measured
+on a fixed tuning set from `train.zip` before the next, then the validation set at
+the end.
+
+**Tuning set.** Every 50th frame (1, 51, ..., 701) of 15 train clips spread over
+the split (SNGS-060, -064, -068, -072, -076, -099, -103, -107, -111, -115, -154,
+-158, -162, -166, -170): 225 frames, cached locally (gitignored). The validation
+clips were first measured after step 4; the changes after that were chosen on the
+tuning set alone, and both validation runs are reported. Person mask: the frame's *labelled* person
+boxes stand in for the detector's (the pipeline passes its detections; the eval
+tool uses the labels' image boxes, never their pitch positions).
+
+**What changed** (`varlab_vision/calibration.py`):
+
+1. *Marking pixels by local contrast.* `marking_mask`: a white top-hat (21 px
+   square) on the minimum colour channel, blurred (sigma 1), thresholded at 2.5x
+   its local median (31 px window, capped at 25 so thick strokes cannot raise it)
+   plus 11, inside `grass_region` (the largest green component, holes filled) and
+   outside the person boxes. Against the markings that the labels' homography
+   projects into 69 tuning frames: the old mask found 35% of them with 6.5% of its
+   pixels on a marking; the new one finds 66% with 48% (median 22k pixels a frame
+   against 63k). The board text above the far touchline and white shirts were the
+   bulk of the old mask.
+2. *Curved candidates are not lines.* `stroke_bend` fits a parabola to a
+   candidate's cross-section centroids; one that bows by over 0.7 px with a radius
+   of curvature under 1.3 frame widths is dropped. On 1,213 tuning lines labelled
+   by the labels' homography this removes 62% of the arc chords and 5.6% of the
+   straight lines (1.9% of their length: short ones).
+3. *The centre circle and the penalty arcs.* `detect_ellipses` erases the long
+   straight lines, grows an ellipse from each remaining connected piece over the
+   pixels within about the stroke width, and refits it geometrically (Sampson
+   distance); lines lying on an ellipse are dropped as chords. The search adds
+   hypotheses from the centre circle, the halfway line and one touchline: the
+   halfway line meets the ellipse at (0, +-9.15), its pole with respect to the
+   ellipse is the x vanishing point (the touchline must pass through it), the
+   touchline crossing gives (0, +-34), the cross-ratio along the halfway line the
+   centre, and the line from the centre to the vanishing point meets the ellipse at
+   (+-9.15, 0); six correspondences, one DLT. Ellipses also score hypotheses and
+   enter the refinement (Sampson distance to the projected model circle), at 0.3
+   weight when the lines alone fix the homography. Every line of at least a
+   quarter of the frame width is erased before the ellipse search, whatever its
+   bow (lens distortion bows a long halfway line past the 0.5 px rule for shorter
+   ones, and left it joined to the circle).
+4. *Refuse instead of guess.* Each solution (global or tracked) is refined once
+   more as a pinhole camera (square pixels, principal point at the centre: seven
+   parameters) and checked against the frame (`verify_solution`); `VerifyConfig`
+   refuses it when the homography has no real camera behind it (no positive
+   focal length, or a camera outside x +-70 m, y 15 to 150 m, 3 to 50 m up: the
+   GSR main camera sits on the +y side), when over 30% of the detected line length
+   is unexplained, when leaving out any one matched marking moves the visible pitch
+   by over 5 m, when the free fit is far from a camera (inconsistency over 0.2), or
+   when the fit's standard error at the people's feet (parameter covariance carried
+   to the pitch) exceeds 0.11 m (0.5 m at the 90th percentile of the visible pitch
+   without person boxes). The same camera box also prunes the global search, where
+   hypotheses no camera could produce often outscored the right one. A refused
+   global solution is followed by up to three distinct runner-up hypotheses; if all
+   fail the frame is `uncalibrated`, with the reasons in `note` and the evidence in
+   `verify`.
+
+Thresholds, on the tuning set only:
+
+| Step | Frames claimed | Claimed frames: under 1 m / 1 to 5 m / over 5 m | Precision (under 1 m) | People within 1 m |
+|---|---|---|---|---|
+| Before (`e3ec8a1`) | 86 of 225 | 16 / 2 / 67 | 0.19 | 5.7% |
+| 1. contrast mask, people boxed out | 160 of 225 | 75 / 19 / 65 | 0.47 | 30.9% |
+| 2. + bend test | 165 of 225 | 78 / 23 / 63 | 0.48 | 32.5% |
+| 3. + centre circle and arcs | 177 of 225 | 103 / 28 / 46 | 0.58 | 42.5% |
+|    robustness for the synthetic tests (see below) | 164 of 225 | 103 / 29 / 32 | 0.63 | 43.2% |
+|    + refinement as a camera | 168 of 225 | 107 / 32 / 29 | 0.64 | 44.7% |
+| 4. + verification (refuse) | 79 of 225 | 75 / 4 / 0 | 0.95 | 30.0% |
+|    + runner-up hypotheses | 81 of 225 | 77 / 4 / 0 | 0.95 | 30.6% |
+|    + fit weights out of the boxes | 81 of 225 | 75 / 6 / 0 | 0.93 | 30.4% |
+|    + camera prior in the search, long lines erased before the ellipse search, limit 0.11 m (final) | 89 of 225 | 83 / 6 / 0 | 0.93 | 33.7% |
+
+The robustness row is what the synthetic tests needed: the noise level capped at
+25 (thick near-camera strokes filled the median window), a 2 px peel halo (the
+contrast mask keeps the anti-aliased fringe on one side of a stroke, and a 1 px
+halo left it as a parallel "line" 4 px off), arcs at 0.3 weight when lines
+suffice, and fit weights kept out of the person boxes (they cost the tuning set two
+frames). Without verification the calibrator places 44.7% of the people within 1 m
+but claims 168 frames, 61 of them wrongly; with it, the final code claims 89 and is
+wrong on 6, all between 1 and 5 m. The test that refuses most of the far-off
+solutions is the camera: 29 of the 32 frames over 5 m wrong have no positive focal
+length.
+
+**Validation** (`tools/eval_gsr_calibration.py --labels data/gsr_valid --every 50
+--workers 8`, 870 frames of all 58 clips, each calibrated from scratch, labelled
+person boxes as the people mask):
+
+| Measure | 2026-10-26, before (`e3ec8a1`) | 2026-10-29, after (`25f73a6`) |
+|---|---|---|
+| Frames claimed | 265 of 870 (30%) | 351 of 870 (40%) |
+| Claimed frames with labelled people: median under 1 m / 1 to 5 m / over 5 m | 25 / 19 / 216 of 260 | 338 / 11 / 0 of 349 |
+| **Precision of the claim** (share of those under 1 m) | 0.096 | **0.969** |
+| **Labelled people within 1 m**, over all 14,244 on the sampled frames | 3.1% | **38.1%** |
+| Labelled people within 2 m | 3.7% | 41.1% |
+| Foot error on the claimed frames: median / share within 1 m | 56.5 m / 10.5% | 0.40 m / 91.6% |
+| Clips with at least one claimed frame | 58 of 58 (mostly wrong) | 54 of 58 |
+| Uncalibrated frames: refused / no consistent hypothesis / too few markings | (no refusal step) | 297 / 220 / 2 |
+
+Per-clip precision is 1.0 in 45 of the 54 clips with a claimed frame and at
+least 0.8 in 52. The circle or an arc took part in 263 of the 351 claimed frames.
+The most common refusal is a standard error at the people over 0.11 m (262 of the
+297), then unexplained lines (118) and camera inconsistency (76); a frame can have
+several. An intermediate run one commit before the person-box weight fix and the
+search camera prior (`c140171`) gave 313 claimed, precision 0.955, 33.7% within 1 m;
+the final code was then tuned on the train set only.
+
+**The labels are not the paint.** The labels' pitch positions fit a homography
+to about 0.1 to 0.2 m, so that homography stands for the annotation; scored with the
+same marking-support measure as ours (share of the model's marking points in view
+that land on marking pixels), it fits the painted lines worse than our solution.
+On the 337 validation frames within 1 m: median support 0.84 for the labels against
+0.99 for ours (the labels clearly worse, by over 0.1, in 185). On the 11 frames
+between 1 and 5 m: 0.73 against 0.98 (labels clearly worse in 9). The tuning set
+showed the same, and overlays of such frames show our lines on the paint and the
+labels' a few pixels off (up to about 10 px on a far touchline). So most of the "1
+to 5 m" column is annotation error, and precision against the labels understates
+precision against the pitch; the labels are still the yardstick here.
+
+**Tracked clip.** All 750 frames of SNGS-021 in order through a `FrameCalibrator`
+(tracking, filter, frame stride; `--tracked --every 1 --clips SNGS-021`): before, the
+median error over the clip was 46 m. Now 314 frames are claimed (20 global, 278
+tracked, 16 interpolated), 264 within 1 m, 50 between 1 and 5 m, none over 5 m
+(precision 0.84); 33.7% of the labelled people within 1 m; median foot error on the
+claimed frames 0.42 m. The 50 are all tracked frames in three stretches (391-408,
+477-500, 602-618), and there the annotation is what moves: the camera the labels
+imply sits a median 6.8 m from its own clip-median position on those 50 frames
+(1.8 m on the 264 we agree on), while ours stays at about (0.4, 49.4, 9.5) m, as a
+fixed broadcast camera should. On frame 609, for one, our model lines lie on the
+painted penalty area and near touchline and the labels' are visibly off; the
+labels' homography reaches marking support 0.73 there against our 0.91. A
+from-scratch fit of frame 603 agrees with the tracked one (1.33 m from the labels).
+
+**Timing**, back to back on the Mac (one process, the same 45 tuning frames,
+each twice): old code 0.68 and 0.71 s per frame (median of the
+two passes), new code 0.80 and 0.92 s: the global search with verification is about
+1.25 times slower. The SNGS-021 tracked run took 506 s for 750 frames (0.68 s a frame)
+on one core, because every uncalibrated frame falls back to the global search;
+on the Colab VM's CPU, about three times slower, calibration would be the slowest
+stage of a real clip (roughly 25 minutes). The validation run's 2.6 s per frame is
+eight workers sharing ten cores.
+
+**Tests.** `tests/vision` 137 passed (the 120 synthetic tests unchanged, plus
+`test_calibration_broadcast.py`, 15 tests on rendered frames, one or more per
+mechanism; a pipeline test that the person detections reach the calibrator; an
+eval-tool test of the precision summary); `tests/python` 40 passed, 4 skipped.
+
+**Not done / limits.** Coverage is the price of precision: 40% of the sampled
+validation frames are claimed. A sample of the uncalibrated tuning frames shows
+ordinary main-camera views, not close-ups: midfield views where the circle is
+faint or only partly found, and views whose markings are few, short or far, so
+the fit's standard error at the people stays over the limit. Better ellipse
+detection and a lens-distortion term are the next levers. Penalty arcs are scored
+and fitted but do not seed hypotheses (an arc of about 106 degrees does not fix its
+conic well enough for the pole construction). The camera prior (main camera on
+the +y side, 3 to 50 m up) is GSR's; another dataset may need
+`VerifyConfig.camera_box` relaxed. The person mask was measured with the labelled
+boxes; the detector misses about one person in five (recall 0.81), and a missed
+white shirt can still read as a marking.
 
 ## Two things the first runs taught
 
