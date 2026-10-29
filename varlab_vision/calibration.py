@@ -3,23 +3,37 @@
 Classical and licence-free: no learned keypoint detector, no code from
 PnLCalib (GPL-2) or TrackLab / sn-gamestate (GPL-3). The chain is
 
-1. ``white_line_mask``: bright, low-saturation pixels next to grass.
+1. ``marking_mask``: thin structures brighter than the grass around them (a white top-hat
+   on the minimum colour channel, thresholded against the local grass level of that
+   response), inside the grass region (``grass_region``: the largest green area, holes
+   filled) and outside the given person boxes. ``white_line_mask`` (bright, unsaturated
+   pixels near grass) is the earlier mask, kept for comparison (``mask="white"``).
 2. ``extract_lines``: probabilistic Hough segments as seeds; each seed is refitted to the
    mask pixels around it by a robust cross-section-centroid fit (Theil-Sen + Tukey, with a
    band that follows the stroke thickness) and then *peeled*: its pixels are removed from
-   the live mask so no second line can be found on the same marking.
-3. ``search_homography``: a RANSAC-style hypothesis search over assignments of
+   the live mask so no second line can be found on the same marking. A candidate that
+   bows like a piece of a curve (``stroke_bend``) is dropped.
+3. ``detect_ellipses``: the curved marking pixels (the centre circle, the penalty arcs) as
+   ellipses, grown from connected pieces and refitted geometrically; straight candidates
+   lying on one are dropped (``drop_chords``).
+4. ``search_homography``: a RANSAC-style hypothesis search over assignments of
    four image lines to two ``x = const`` and two ``y = const`` lines of the
-   :class:`~varlab_vision.pitch_model.PitchModel`. Every hypothesis is scored on
-   all detected lines: an image line is an inlier of a model line when its
-   endpoints lie within ``tau_px`` of the projected model line *and* its
-   back-projection lies on a drawn segment of that line (not on the invisible
-   part of the infinite line). The search is vectorised (batched DLT) and the scorer is
+   :class:`~varlab_vision.pitch_model.PitchModel`, plus hypotheses from the centre circle,
+   the halfway line and one touchline (``_circle_hypotheses``). Every hypothesis is
+   scored on all detected lines and ellipses: an image line is an inlier of a model line
+   when its endpoints lie within ``tau_px`` of the projected model line *and* its
+   back-projection lies on a drawn segment of that line (not on the invisible part of the
+   infinite line); an ellipse is an inlier of a model circle when its points lie on the
+   projected circle's drawn part. The search is vectorised (batched DLT) and the scorer is
    invariant to the scale and sign a caller gives the homography.
-4. ``refine_homography``: Levenberg-Marquardt on the eight homography
-   parameters, minimising the pixel distance between the inlier segments'
-   endpoints and the projected model lines.
-5. ``FrameCalibrator``: per-frame state. A shot-cut test (grey thumbnail difference or
+5. ``refine_homography``: Levenberg-Marquardt on the eight homography parameters,
+   minimising the pixel distances of the inlier segments' endpoints (and the matched
+   ellipses' points) to the projected model markings, then again as a pinhole camera
+   (focal length, rotation, position).
+6. ``verify_solution``: the evidence for a solution in the frame itself (marking support,
+   unexplained lines, leave-one-out agreement, the camera it implies, the fit's standard
+   error where the people are); ``VerifyConfig`` decides when it is refused.
+7. ``FrameCalibrator``: per-frame state. A shot-cut test (grey thumbnail difference or
    hue-saturation histogram distance) clears all state. Otherwise frame t is *tracked*
    from the filter's one-step prediction (then from the previous solution), falling back
    to the global search when tracking has too few correspondences or keeps clearly fewer
@@ -30,22 +44,21 @@ PnLCalib (GPL-2) or TrackLab / sn-gamestate (GPL-3). The chain is
    fitted and the frames between are interpolated between fits (status ``interpolated``),
    each one checked against its own markings (see ``DEFAULT_FRAME_STRIDE``).
 
-A frame is **calibrated** only when at least ``min_inliers`` lines match with at
-least two from each family (otherwise the homography is unconstrained along one
-pitch axis); anything else is reported as ``uncalibrated`` with NaN pitch
-coordinates, never as a guess.
+A frame is **calibrated** only when enough markings match (two lines of each family, or
+a circle with a line of each) *and* the solution passes verification; anything else is
+reported as ``uncalibrated`` with NaN pitch coordinates and the reason in ``note``, never
+as a guess.
 
 Errors reported per frame: ``fit_error_px`` (RMS pixel distance of inlier
 endpoints to their projected model lines, the quantity minimised) and
 ``reprojection_error_m`` (RMS metre distance of the same endpoints,
 back-projected, to the model lines: how the pixel error looks on the pitch).
 
-Limits, stated once: single camera, planar pitch (no height, no lens
-distortion), straight markings only (the circle and arcs are not used yet),
-and a view that shows at least four markings. Accuracy on real broadcast
-frames is unmeasured until SoccerNet clips are available; the synthetic clip in
-``synthetic.py`` has perfect lines and no crowd, so numbers from it are an upper
-bound on what to expect.
+Limits, stated once: single camera, planar pitch (no height, no lens distortion), a
+broadcast main camera on the ``+y`` side (the verification's camera prior), and a view
+that shows enough markings. On SoccerNet GSR frames (``tools/eval_gsr_calibration.py``,
+numbers in ``analysis/vision_env.md``) the calibrator claims about a third of the frames
+and most of those are within a metre of the labels; the rest it refuses.
 """
 from __future__ import annotations
 

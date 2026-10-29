@@ -25,6 +25,10 @@ Headline numbers in the summary:
   frame (an uncalibrated frame places nobody);
 * ``calibrated_share`` and the claimed frames by median error (under 1 m, 1 to 5 m, over 5 m).
 
+``--tracked`` feeds a clip's sampled frames in order through a ``FrameCalibrator`` (tracking, the
+filter and the frame stride, as the pipeline does) instead of calibrating each from scratch;
+use it with ``--every 1`` on a few clips.
+
 Labels are read from ``--labels/<clip>/Labels-GameState.json`` when present (fetch them
 once with ``varlab_vision.remote_zip.extract_clip(..., labels_only=True)``),
 otherwise out of the zip. Frames are kept in memory only, unless ``--frame-cache`` names a
@@ -87,6 +91,37 @@ def _work(args):
     return frame_result(jpeg, gt, use_boxes)
 
 
+def _errors_row(res, gt: np.ndarray, seconds: float) -> dict:
+    out = {"status": res.status, "seconds": round(seconds, 4), "n_inliers": res.n_inliers, "note": res.note[:160],
+           "refused": res.note.startswith("refused")}
+    if res.ok and len(gt):
+        feet = np.stack([gt[:, 0] + gt[:, 2] / 2, gt[:, 1] + gt[:, 3]], axis=1)
+        err = np.linalg.norm(res.project(feet) - gt[:, 4:6], axis=1)
+        err = err[np.isfinite(err)]
+        out["errors_m"] = [round(float(e), 3) for e in err]
+        out["median_m"] = round(float(np.median(err)), 3) if len(err) else None
+    return out
+
+
+def _work_tracked(frames: list) -> list:
+    """One clip in order through a FrameCalibrator: ``frames`` is [(jpeg, gt, use_boxes), ...]."""
+    import cv2
+
+    fc = cal.FrameCalibrator()
+    gts, out, t_prev = [], [], time.perf_counter()
+    for jpeg, gt, use_boxes in frames:
+        img = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
+        boxes = np.stack([gt[:, 0], gt[:, 1], gt[:, 0] + gt[:, 2], gt[:, 1] + gt[:, 3]], axis=1) if len(gt) else None
+        gts.append(gt)
+        for res in fc.push(img, person_boxes=boxes if use_boxes else None):
+            now = time.perf_counter()
+            out.append(_errors_row(res, gts[len(out)], now - t_prev))
+            t_prev = now
+    for res in fc.flush():
+        out.append(_errors_row(res, gts[len(out)], 0.0))
+    return out
+
+
 def summary_of(rows: list, n_labelled_total: int) -> dict:
     """The headline numbers (see the module docstring) over per-frame rows."""
     n = len(rows)
@@ -125,6 +160,7 @@ def main(argv=None) -> int:
                     help="leave the labelled person boxes out of the marking mask (stand-in for detections)")
     ap.add_argument("--workers", type=int, default=1, help="processes for the calibration (frames are read first)")
     ap.add_argument("--frame-cache", default=None, help="folder to keep the read JPEGs in (gitignored data/...)")
+    ap.add_argument("--tracked", action="store_true", help="each clip in order through a FrameCalibrator")
     ap.add_argument("--out", required=True)
     args = ap.parse_args(argv)
 
@@ -160,15 +196,24 @@ def main(argv=None) -> int:
             keys.append((clip, fi))
             n_labelled[clip] = n_labelled.get(clip, 0) + len(g)
     print(f"read {len(jobs)} frames of {len(clips)} clips ({time.time() - t_start:.0f} s)", flush=True)
+    for v in ("OMP_NUM_THREADS", "VECLIB_MAXIMUM_THREADS", "OPENBLAS_NUM_THREADS"):
+        os.environ.setdefault(v, "1")  # one BLAS thread per worker process
+    if args.tracked:  # one job per clip, its frames in order
+        by_clip: dict = {}
+        for (clip, _fi), job in zip(keys, jobs):
+            by_clip.setdefault(clip, []).append(job)
+        work, fn, chunk = list(by_clip.values()), _work_tracked, 1
+    else:
+        work, fn, chunk = jobs, _work, 4
     if args.workers > 1:
         from multiprocessing import get_context
 
-        for v in ("OMP_NUM_THREADS", "VECLIB_MAXIMUM_THREADS", "OPENBLAS_NUM_THREADS"):
-            os.environ.setdefault(v, "1")  # one BLAS thread per worker process
         with get_context("spawn").Pool(args.workers) as pool:
-            results = pool.map(_work, jobs, chunksize=4)
+            results = pool.map(fn, work, chunksize=chunk)
     else:
-        results = [_work(j) for j in jobs]
+        results = [fn(j) for j in work]
+    if args.tracked:
+        results = [r for clip_rows in results for r in clip_rows]
     per_clip: dict = {}
     for (clip, fi), r, (_j, g, _b) in zip(keys, results, jobs):
         r["frame"] = fi
@@ -182,6 +227,7 @@ def main(argv=None) -> int:
         print(f"[{k}/{len(per_clip)}] {clip}: {c['calibrated']}/{c['frames']} calibrated, precision "
               f"{c['precision_1m']}, people within 1 m {c['within_1m']}", flush=True)
     summary = {"dataset": args.dataset, "split": args.split, "every": args.every, "clips": len(per_clip),
+               "mode": "tracked (FrameCalibrator, frame stride)" if args.tracked else "each frame from scratch",
                "person_mask": ("labelled person boxes (stand-in for the detector's)" if args.person_mask == "labels"
                                else "none"),
                **summary_of(results, sum(n_labelled.values())),

@@ -26,7 +26,8 @@ Pitch coordinates come from one of two sources: a static ``PitchProjector``
 (a known homography, used by the synthetic smoke test) or a per-frame
 ``FrameCalibrator`` from ``calibration.py`` that finds the markings (fed through
 ``push`` / ``flush``, so its frame stride applies: during steady tracking most
-frames are interpolated between fitted ones). With a calibrator each object also
+frames are interpolated between fitted ones; each frame's person detections go
+with it and are left out of the marking mask). With a calibrator each object also
 carries ``pitch_x`` / ``pitch_y`` (metres, bottom-middle; null when the frame is
 uncalibrated), ``calib_error`` (the frame's RMS line-fit error in pixels; null
 when unknown, which includes every interpolated frame) and ``calib_status``

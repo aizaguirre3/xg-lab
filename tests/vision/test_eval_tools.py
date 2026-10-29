@@ -59,3 +59,20 @@ def test_ball_found_within_the_pixel_radius():
     pr = _rows([(1, 0, "ball", None, 108, 100, 4, 4), (2, 0, "ball", None, 260, 100, 4, 4)])
     r = ev.rates(ev.score_clip(gt, pr, ball_px=15.0))
     assert r["ball_recall"] == 0.5 and r["ball_precision"] == 0.5
+
+
+def test_calibration_summary_reports_the_precision_of_the_claim():
+    ev = _tool("eval_gsr_calibration")
+    rows = [
+        {"status": "calibrated", "seconds": 1.0, "median_m": 0.4, "errors_m": [0.3, 0.4, 0.5]},
+        {"status": "calibrated", "seconds": 1.0, "median_m": 2.5, "errors_m": [2.0, 2.5, 3.0]},
+        {"status": "calibrated", "seconds": 1.0, "median_m": 0.8, "errors_m": [0.8, 0.9]},
+        {"status": "uncalibrated", "seconds": 2.0, "refused": True},
+        {"status": "uncalibrated", "seconds": 2.0},
+    ]
+    s = ev.summary_of(rows, n_labelled_total=14)
+    assert s["frames"] == 5 and s["calibrated_share"] == 0.6 and s["refused"] == 1
+    assert s["precision_1m"] == pytest.approx(2 / 3, abs=1e-4)
+    assert s["claimed_by_median"] == {"under_1m": 2, "1_to_5m": 1, "over_5m": 0}
+    assert s["within_1m_of_all_labelled_boxes"] == pytest.approx(5 / 14, abs=1e-4)
+    assert ev.summary_of([], 0)["precision_1m"] is None
