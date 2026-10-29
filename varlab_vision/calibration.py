@@ -1912,7 +1912,12 @@ def calibrate_frame(frame_bgr: np.ndarray, model: PitchModel = DEFAULT_PITCH, pr
             mpx[person_box_mask(mpx.shape, person_boxes)] = 0
     else:
         mpx = marking_mask(frame_bgr, person_boxes=person_boxes, grass=grass, **(mask_kw or {}))
-    line_kw = {"weights": line_weights(frame_bgr, mpx), "max_bend_px": DEFAULT_MAX_BEND_PX,
+    weights = line_weights(frame_bgr, mpx)
+    if person_boxes is not None and len(person_boxes):
+        # the soft weights reach 3 px past the mask: keep them out of the people too, or the fit sees half
+        # a stroke at every box edge
+        weights[person_box_mask(mpx.shape, person_boxes)] = 0.0
+    line_kw = {"weights": weights, "max_bend_px": DEFAULT_MAX_BEND_PX,
                "min_bend_radius_px": DEFAULT_MIN_BEND_RADIUS * w, "peel_halo_px": DEFAULT_PEEL_HALO_PX,
                **(line_kw or {})}
     lines = extract_lines(mpx, **line_kw)
