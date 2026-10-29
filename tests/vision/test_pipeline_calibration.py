@@ -456,6 +456,41 @@ def test_a_calibrator_failure_while_frames_are_held_marks_them_all_uncalibrated(
     assert cal.resets == 2 and report.calibration["uncalibrated"] == 3
 
 
+class _BoxRecordingCalibrator:
+    """A ``push`` calibrator that takes person boxes and records what it was given."""
+
+    name = "box-recording"
+
+    def __init__(self, h_px2m: np.ndarray):
+        self.h, self.boxes = h_px2m, []
+
+    n_pending = 0
+
+    def reset(self) -> None:
+        pass
+
+    def push(self, frame_bgr: np.ndarray, person_boxes=None):
+        self.boxes.append(person_boxes)
+        return [_calibrated(self.h)]
+
+    def flush(self):
+        return []
+
+
+def test_the_pipeline_hands_the_person_detections_to_the_calibrator(tmp_path: Path):
+    """The detector's person boxes reach a calibrator that takes them (the marking mask leaves them
+    out); calibrators without the parameter, as above, keep working."""
+    clip = render_synthetic_clip(tmp_path, n_frames=2, width=640, height=360, n_per_team=2,
+                                 with_referee=False, seed=4, with_markings=False)
+    cal = _BoxRecordingCalibrator(clip.homography)
+    pipe = pl.smoke_pipeline(tracker=pl.GreedyIoUTracker(), calibrator=cal)
+    pipe.run_clip(clip.clip_dir, tmp_path / "pred" / LABELS_FILE, game_id="g")
+    assert len(cal.boxes) == 2
+    for b in cal.boxes:
+        assert b is not None and b.shape == (4, 4)  # two players a side, all detected
+        assert (b[:, 2] > b[:, 0]).all() and (b[:, 3] > b[:, 1]).all()
+
+
 def test_calibration_results_must_line_up_with_the_frames():
     pipe = pl.VisionPipeline(detector=pl.ColorBlobDetector(), tracker=pl.GreedyIoUTracker(), calibrator=FrameCalibrator())
     per_frame = [(1, 160, 90, pl.FrameDetections.empty()), (2, 160, 90, pl.FrameDetections.empty())]
@@ -543,3 +578,55 @@ def test_runner_passes_the_calibration_switch_to_setup(capsys, tmp_path: Path):
     assert "with_calibration=True" in capsys.readouterr().out
     assert runner.main(base + ["--no-calibration"]) == 0
     assert "with_calibration=False" in capsys.readouterr().out
+
+
+def test_worker_reads_a_clip_out_of_the_split_zip(tmp_path: Path, monkeypatch):
+    """hf_layout="zip": the clip is range-read out of <split>.zip (opened once per split), processed,
+    and its frames deleted afterwards. The "remote" zip is in memory, in the SN-GSR-2025 layout."""
+    import io
+    import zipfile
+
+    import varlab_vision.remote_zip as rz
+
+    worker = _load_colab("vision_worker")
+    clip = render_synthetic_clip(tmp_path / "src", n_frames=3, width=640, height=360, n_per_team=2,
+                                 with_referee=False, seed=0, name="SNGS-077")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("sequences_info.json", "{}")
+        for p in sorted(clip.clip_dir.rglob("*")):
+            if p.is_file():
+                zf.write(p, p.relative_to(clip.clip_dir.parent).as_posix())
+    data = buf.getvalue()
+    opened = []
+
+    def fake_open(url, token=None, **kw):
+        opened.append(url)
+        rf = rz.RangeFile(lambda s, e: data[s:e], len(data), block_size=4096)
+        return zipfile.ZipFile(rf), rf
+
+    monkeypatch.setattr(rz, "open_remote_zip", fake_open)
+    pipe = pl.smoke_pipeline(tracker=pl.GreedyIoUTracker())
+    monkeypatch.setattr(worker, "_STATE", {"pipeline": pipe, "head": "deadbeef", "with_calibration": False,
+                                           "hf_dataset": "SoccerNet/SN-GSR-2025", "hf_revision": "main",
+                                           "hf_layout": "zip"})
+    monkeypatch.setattr(worker, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr(worker, "OUT_DIR", tmp_path / "out")
+
+    rep = worker.process_clip("SNGS-077", split="valid")
+    assert opened == ["https://huggingface.co/datasets/SoccerNet/SN-GSR-2025/resolve/main/valid.zip"]
+    assert rep["frames"] == 3 and rep["download"]["mb"] > 0 and rep["download"]["seconds"] >= 0
+    assert (tmp_path / "out" / "valid" / "SNGS-077" / "Labels-GameState.json").is_file()
+    assert not (tmp_path / "data" / "valid" / "SNGS-077" / "img1").exists()  # frames removed after the run
+    worker.process_clip("SNGS-077", split="valid")
+    assert len(opened) == 1  # the split's zip directory is read once per kernel
+
+
+def test_worker_heartbeat_prints_while_a_step_is_silent(capsys):
+    import time as _time
+
+    worker = _load_colab("vision_worker")
+    with worker._Heartbeat("SNGS-000", every=0.05):
+        _time.sleep(0.2)
+    out = capsys.readouterr().out
+    assert out.count("SNGS-000: still working") >= 2

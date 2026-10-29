@@ -172,7 +172,7 @@ If you had cloned the branch before 2026-10-15, discard that clone or reset it t
 1. Open a pull request to `main` if you want the work merged (the author rewrite in section 7 is done).
 2. Add the StatsBomb logo to the README (licence 1.4).
 3. SkillCorner reader: done (`R/12_read_skillcorner.R`, 2026-10-17). Still to write: an IDSSE reader (TRACAB positions, 25 Hz) that builds the same match bundle for `evaluate_tracking_match()`, and a pose reader for SkillCorner's body-pose files, which give the limb-level offset measurement the scope asked for.
-4. M4/M5 only after SoccerNet access and a 12 to 24 GB GPU are in hand; the stack is listed in `var_vision_scope.md` section 6.
+4. M4/M5: the GSR data needs no NDA (public on Hugging Face, see the 2026-10-26 run below); the first real-footage numbers are in `analysis/vision_env.md`. Calibration was reworked on 2026-10-29 (validation: 97% of the frames it claims are within 1 m of the labels, 40% of the frames claimed, nothing over 5 m); its coverage and its CPU cost on long clips are what to improve before M5 (offside line). The stack is listed in `var_vision_scope.md` section 6.
 5. Optional: add xgboost to `R/07_decision_models.R` now that CRAN is reachable, and re-render `analysis/report.qmd` with Quarto if you want the xG report and VAR-Lab in one document.
 
 ### M4 on Colab (added 2026-10-17)
@@ -255,6 +255,61 @@ fitting every frame, so the gain on real clips depends on how steady the camera
 is. `FrameCalibrator(frame_stride=1)` or `update()` fits every frame. Full
 tables are in `analysis/vision_env.md`. Accuracy on real broadcast frames is not
 measured: every number so far comes from synthetic clips.
+
+First real footage (2026-10-26). `SoccerNet/SN-GSR-2025` is public on Hugging Face
+(no NDA or token; one zip per split, `valid.zip` 11.2 GB, 58 clips), and the runner
+range-reads one clip at a time out of it (`--hf-layout zip`, the default; `--all`
+lists the split's clips). All 58 validation clips ran on the L4 with
+`--no-pose --no-calibration` in 43 min of processing, about 44 s per clip. Results
+(`analysis/vision_env.md`, section "First real footage"): box precision 0.946 and
+recall 0.814, MOTA 0.763, IDF1 0.628, team split 0.735, ball found 0.346. The
+calibration does not work on broadcast frames yet (3% of labelled people within
+1 m, mostly wrong locks), so keep `--no-calibration` on real clips until it is
+reworked. Score a run with `tools/eval_gsr_tracking.py` and measure calibration
+with `tools/eval_gsr_calibration.py`; both read the labels from
+`data/gsr_valid/<clip>/Labels-GameState.json` (fetch with
+`varlab_vision.remote_zip.extract_clip(..., labels_only=True)`).
+
+Calibration on broadcast frames (2026-10-29). The calibrator was reworked for
+real footage and now refuses rather than guesses (`analysis/vision_env.md`,
+section "Calibration on broadcast frames"):
+- marking pixels by local contrast (white top-hat against the local grass level)
+  inside the grass region, with the people's boxes left out (the pipeline passes
+  its person detections to the calibrator);
+- candidate lines that bow like a piece of a curve are dropped;
+- the centre circle and penalty arcs are fitted as ellipses; a view with only the
+  halfway line, one touchline and the circle is solved from the circle;
+- every solution is refined as a pinhole camera and verified against the frame
+  (a real main-side camera, explained lines, leave-one-out agreement, the fit's
+  standard error at the people); a refused frame is `uncalibrated` with the
+  reasons in its note.
+
+Thresholds were set on a train tuning set (225 frames of 15 `train.zip` clips);
+the validation set was measured at the end, every 50th frame of all 58 clips,
+with the labelled person boxes standing in for detections:
+
+| Measure (validation, every 50th frame, 870 frames) | Before (2026-10-26) | After (2026-10-29) |
+|---|---|---|
+| Frames claimed | 265 (30%) | 351 (40%) |
+| Claimed frames under 1 m / 1 to 5 m / over 5 m | 25 / 19 / 216 | 338 / 11 / 0 |
+| Precision of the claim (under 1 m) | 0.096 | 0.969 |
+| Labelled people within 1 m, all sampled frames | 3.1% | 38.1% |
+| Foot error on claimed frames, median | 56.5 m | 0.40 m |
+
+Precision against the labels is held down by the labels themselves: on the
+frames where we disagree by 1 to 5 m, our homography usually lies on the painted
+lines and the labels' does not. On a full tracked clip (SNGS-021, 750 frames)
+42% of the frames are claimed and none is over 5 m (the median error was 46 m
+before); its 50 claimed frames at 1 to 5 m are stretches where the camera the
+labels imply wanders by several metres. Coverage is the open item: 60% of the
+sampled frames are still refused or unsolved, mostly ordinary main-camera views
+with faint, short or partly found markings. Measure with
+`tools/eval_gsr_calibration.py --labels data/gsr_valid --every 50 --workers 8`
+(`--tracked --every 1 --clips ...` runs clips in order through a
+`FrameCalibrator`). Calibration can go back on for real clips, at a cost: on the
+Mac a 750-frame clip takes about 8.5 minutes of one core (every uncalibrated
+frame retries the global search), so on the Colab VM's slower CPU calibration
+becomes the slowest stage of a real clip.
 
 ## 9. Things the cloud session could not verify
 

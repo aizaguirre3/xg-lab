@@ -26,7 +26,8 @@ Pitch coordinates come from one of two sources: a static ``PitchProjector``
 (a known homography, used by the synthetic smoke test) or a per-frame
 ``FrameCalibrator`` from ``calibration.py`` that finds the markings (fed through
 ``push`` / ``flush``, so its frame stride applies: during steady tracking most
-frames are interpolated between fitted ones). With a calibrator each object also
+frames are interpolated between fitted ones; each frame's person detections go
+with it and are left out of the marking mask). With a calibrator each object also
 carries ``pitch_x`` / ``pitch_y`` (metres, bottom-middle; null when the frame is
 uncalibrated), ``calib_error`` (the frame's RMS line-fit error in pixels; null
 when unknown, which includes every interpolated frame) and ``calib_status``
@@ -43,6 +44,7 @@ pitch side; jersey numbers are always null.
 """
 from __future__ import annotations
 
+import inspect
 import math
 import time
 from dataclasses import dataclass, field
@@ -655,20 +657,25 @@ class VisionPipeline:
             timers["pose"].add(time.perf_counter() - t0, 1)
         return dets
 
-    def _calibrate(self, frame_bgr: Optional[np.ndarray]) -> List["CalibrationResult"]:
+    def _calibrate(self, frame_bgr: Optional[np.ndarray], person_boxes: Optional[np.ndarray] = None) -> List["CalibrationResult"]:
         """One calibrator step: the results that became final with this frame, in frame order (none
         while a ``FrameCalibrator`` holds the frame back, several when its held stretch closes; a
         calibrator with only ``update`` gives one per frame). ``None`` flushes what is still held at
         the end of the clip. When the calibrator chokes (a singular homography on a degenerate view,
         say), this frame and every frame it was still holding are reported uncalibrated with the
         reason in ``note`` and the calibrator is reset, rather than aborting a clip that has already
-        cost minutes of detector time."""
+        cost minutes of detector time. The frame's person boxes go to calibrators that take them (they are
+        left out of the marking mask: a white shirt is as bright and as thin as a line)."""
         push = getattr(self.calibrator, "push", None)
         held = int(getattr(self.calibrator, "n_pending", 0)) if push is not None else 0
+        step = push if push is not None else self.calibrator.update
+        kw = {}
+        if person_boxes is not None and "person_boxes" in inspect.signature(step).parameters:
+            kw["person_boxes"] = person_boxes
         try:
             if frame_bgr is None:
                 return self.calibrator.flush() if push is not None else []
-            return push(frame_bgr) if push is not None else [self.calibrator.update(frame_bgr)]
+            return push(frame_bgr, **kw) if push is not None else [self.calibrator.update(frame_bgr, **kw)]
         except Exception as e:  # noqa: BLE001
             from .calibration import STATUS_UNCALIBRATED, CalibrationResult
 
@@ -708,7 +715,8 @@ class VisionPipeline:
             per_frame.append((fidx, w, h, dets))
             if self.calibrator is not None:
                 t0 = time.perf_counter()
-                calib.extend(self._calibrate(frame))
+                people = np.asarray(dets.class_name) == CLASS_PERSON
+                calib.extend(self._calibrate(frame, np.asarray(dets.xyxy, float).reshape(-1, 4)[people]))
                 timers["calib"].add(time.perf_counter() - t0, 1)
             if self.embedder is not None and dets.tracker_id is not None and k % stride == 0:
                 for i in range(len(dets)):
