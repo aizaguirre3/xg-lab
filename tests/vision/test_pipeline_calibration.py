@@ -456,6 +456,41 @@ def test_a_calibrator_failure_while_frames_are_held_marks_them_all_uncalibrated(
     assert cal.resets == 2 and report.calibration["uncalibrated"] == 3
 
 
+class _BoxRecordingCalibrator:
+    """A ``push`` calibrator that takes person boxes and records what it was given."""
+
+    name = "box-recording"
+
+    def __init__(self, h_px2m: np.ndarray):
+        self.h, self.boxes = h_px2m, []
+
+    n_pending = 0
+
+    def reset(self) -> None:
+        pass
+
+    def push(self, frame_bgr: np.ndarray, person_boxes=None):
+        self.boxes.append(person_boxes)
+        return [_calibrated(self.h)]
+
+    def flush(self):
+        return []
+
+
+def test_the_pipeline_hands_the_person_detections_to_the_calibrator(tmp_path: Path):
+    """The detector's person boxes reach a calibrator that takes them (the marking mask leaves them
+    out); calibrators without the parameter, as above, keep working."""
+    clip = render_synthetic_clip(tmp_path, n_frames=2, width=640, height=360, n_per_team=2,
+                                 with_referee=False, seed=4, with_markings=False)
+    cal = _BoxRecordingCalibrator(clip.homography)
+    pipe = pl.smoke_pipeline(tracker=pl.GreedyIoUTracker(), calibrator=cal)
+    pipe.run_clip(clip.clip_dir, tmp_path / "pred" / LABELS_FILE, game_id="g")
+    assert len(cal.boxes) == 2
+    for b in cal.boxes:
+        assert b is not None and b.shape == (4, 4)  # two players a side, all detected
+        assert (b[:, 2] > b[:, 0]).all() and (b[:, 3] > b[:, 1]).all()
+
+
 def test_calibration_results_must_line_up_with_the_frames():
     pipe = pl.VisionPipeline(detector=pl.ColorBlobDetector(), tracker=pl.GreedyIoUTracker(), calibrator=FrameCalibrator())
     per_frame = [(1, 160, 90, pl.FrameDetections.empty()), (2, 160, 90, pl.FrameDetections.empty())]
