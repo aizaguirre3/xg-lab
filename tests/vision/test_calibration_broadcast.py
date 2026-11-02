@@ -17,7 +17,7 @@ cv2 = pytest.importorskip("cv2")
 
 from varlab_vision import calibration as cal  # noqa: E402
 from varlab_vision.pitch_model import DEFAULT_PITCH  # noqa: E402
-from varlab_vision.synthetic import GREEN_BGR, BroadcastCamera, wide_camera  # noqa: E402
+from varlab_vision.synthetic import GREEN_BGR, BroadcastCamera, render_synthetic_clip, wide_camera  # noqa: E402
 
 W, H = 1280, 720
 
@@ -300,3 +300,42 @@ def test_frame_calibrator_takes_person_boxes():
     res = fc.update(frame, person_boxes=np.array([[695.0, 295.0, 735.0, 425.0]]))
     assert res.ok, res.note
     assert _keypoint_error(cam, res) < 0.3
+
+
+
+def test_robust_line_factors_only_reduce_lines_out_of_step():
+    ms = [cal.LineMatch(image_index=i, model_name="a", distance_px=d, extent_fraction=1.0)
+          for i, d in enumerate((0.2, 0.5, 2.0, 8.0))]
+    f = cal.robust_line_factors(ms, 1280)  # the bend is at 0.512 px
+    assert f[0] == 1.0 and f[1] == 1.0
+    assert f[2] == pytest.approx(math.sqrt(0.512 / 2.0)) and f[3] == pytest.approx(math.sqrt(0.512 / 8.0))
+    assert cal.robust_line_factors(ms, 1920)[2] > f[2]  # the bend scales with the frame
+
+
+def test_a_bent_fragment_does_not_pull_the_fit(tmp_path):
+    """A short stroke within the matching tolerance of a near-side marking but tilted against it, as a
+    fragment touching something else is. It must not move the fit by more than a few centimetres."""
+    w, h = 1280, 720
+    clip = render_synthetic_clip(tmp_path, n_frames=1, width=w, height=h, n_per_team=3, with_referee=False, seed=0)
+    frame = cv2.imread(str(clip.image_dir / "000001.jpg"))
+    cam = clip.cameras[0]
+    (x0, y0), (x1, y1) = cam.project(np.array([[30.0, 9.16], [36.0, 9.16]]))[0]
+    cv2.line(frame, (int(x0), int(y0) + 1), (int(x1), int(y1) + 6), (255, 255, 255), 3, cv2.LINE_AA)
+    res = cal.calibrate_frame(frame)
+    assert res.ok
+    _, kp = DEFAULT_PITCH.keypoint_array()
+    px, depth = cam.project(kp)
+    vis = (depth > 0) & (px[:, 0] >= 0) & (px[:, 0] < w) & (px[:, 1] >= 0) & (px[:, 1] < h)
+    assert np.linalg.norm(res.project(px[vis]) - kp[vis], axis=1).max() < 0.1
+
+
+def test_the_polish_leaves_the_verification_decision_alone(tmp_path, monkeypatch):
+    """The polish runs after the checks: changing it changes the fit a little, never the verdict or its evidence."""
+    clip = render_synthetic_clip(tmp_path, n_frames=1, width=1280, height=720, n_per_team=3, with_referee=False, seed=0)
+    frame = cv2.imread(str(clip.image_dir / "000001.jpg"))
+    base = cal.calibrate_frame(frame)
+    assert base.status == cal.STATUS_CALIBRATED and base.verify
+    monkeypatch.setattr(cal, "robust_line_factors", lambda matches, width, **kw: {m.image_index: 0.5 for m in matches[::2]})
+    other = cal.calibrate_frame(frame)
+    assert other.status == base.status and other.verify == base.verify
+    assert not np.allclose(other.h_m2px, base.h_m2px)

@@ -409,14 +409,14 @@ length.
 --workers 8`, 870 frames of all 58 clips, each calibrated from scratch, labelled
 person boxes as the people mask):
 
-| Measure | 2026-10-26, before (`e3ec8a1`) | 2026-10-29, after (`25f73a6`) |
+| Measure | 2026-10-26, before (`e3ec8a1`) | 2026-11-02, after |
 |---|---|---|
 | Frames claimed | 265 of 870 (30%) | 351 of 870 (40%) |
 | Claimed frames with labelled people: median under 1 m / 1 to 5 m / over 5 m | 25 / 19 / 216 of 260 | 338 / 11 / 0 of 349 |
 | **Precision of the claim** (share of those under 1 m) | 0.096 | **0.969** |
-| **Labelled people within 1 m**, over all 14,244 on the sampled frames | 3.1% | **38.1%** |
+| **Labelled people within 1 m**, over all 14,244 on the sampled frames | 3.1% | **37.9%** |
 | Labelled people within 2 m | 3.7% | 41.1% |
-| Foot error on the claimed frames: median / share within 1 m | 56.5 m / 10.5% | 0.40 m / 91.6% |
+| Foot error on the claimed frames: median / share within 1 m | 56.5 m / 10.5% | 0.40 m / 91.2% |
 | Clips with at least one claimed frame | 58 of 58 (mostly wrong) | 54 of 58 |
 | Uncalibrated frames: refused / no consistent hypothesis / too few markings | (no refusal step) | 297 / 220 / 2 |
 
@@ -442,11 +442,12 @@ precision against the pitch; the labels are still the yardstick here.
 
 **Tracked clip.** All 750 frames of SNGS-021 in order through a `FrameCalibrator`
 (tracking, filter, frame stride; `--tracked --every 1 --clips SNGS-021`): before, the
-median error over the clip was 46 m. Now 314 frames are claimed (20 global, 278
-tracked, 16 interpolated), 264 within 1 m, 50 between 1 and 5 m, none over 5 m
-(precision 0.84); 33.7% of the labelled people within 1 m; median foot error on the
-claimed frames 0.42 m. The 50 are all tracked frames in three stretches (391-408,
-477-500, 602-618), and there the annotation is what moves: the camera the labels
+median error over the clip was 46 m. Now 313 frames are claimed (20 global, 278
+tracked, 15 interpolated), 264 within 1 m, 49 between 1 and 5 m, none over 5 m
+(precision 0.84); 33.6% of the labelled people within 1 m; median foot error on the
+claimed frames 0.43 m. The 49 are all tracked frames, in the stretches 391-408, 448-449,
+477-500 and 602-618, and there the annotation is what moves (measured just before the
+polish described below, which barely changed this clip): the camera the labels
 imply sits a median 6.8 m from its own clip-median position on those 50 frames
 (1.8 m on the 264 we agree on), while ours stays at about (0.4, 49.4, 9.5) m, as a
 fixed broadcast camera should. On frame 609, for one, our model lines lie on the
@@ -463,8 +464,10 @@ on the Colab VM's CPU, about three times slower, calibration would be the slowes
 stage of a real clip (roughly 25 minutes). The validation run's 2.6 s per frame is
 eight workers sharing ten cores.
 
-**Tests.** `tests/vision` 137 passed (the 120 synthetic tests unchanged, plus
-`test_calibration_broadcast.py`, 15 tests on rendered frames, one or more per
+**Robust polish (2026-11-02).** CI's Linux run failed two synthetic tests: the fit's foot error reached 11.6 cm against a 5 cm limit. It was not really a platform bug: on ten synthetic clips the worst error was 12.5 cm on both Mac and Linux, on different clips. The wide matching tolerance admits short fragments bent by whatever they touch (one 43 px fragment had a 3.9 px residual where most lines were under 0.5 px), and plain least squares lets one pull the whole fit. Comparing options on the ten clips: dropping outlier lines outright gave a worst error of 5.8 cm, since it also removes constraints; Huber down-weighting (a bend at 0.0004 x width pixels) gave 3.9 cm, on both platforms. Down-weighting before verification cost something on real frames, though: 341 frames claimed instead of 351, and one over 5 m, because a wrong fit looked better to the checks. So the polish runs only after a fit has passed, on the plain fit's verdict. That restored 351 claimed frames, 338 / 11 / 0, precision 0.969, as the table shows.
+
+**Tests.** `tests/vision` 140 passed on the Mac and in a linux/amd64 Python 3.12 container matching CI (the 120 synthetic tests unchanged, plus
+`test_calibration_broadcast.py`, 18 tests on rendered frames, one or more per
 mechanism; a pipeline test that the person detections reach the calibrator; an
 eval-tool test of the precision summary); `tests/python` 40 passed, 4 skipped.
 

@@ -1486,7 +1486,7 @@ def match_lines(h_m2px: np.ndarray, lines: Sequence[ImageLine], model: PitchMode
 
 def _fit_residuals(lines: Sequence[ImageLine], matches: Sequence[LineMatch], model: PitchModel,
                    ellipses: Sequence[ImageEllipse] = (), arc_matches: Sequence[ArcMatch] = (),
-                   arc_weight: float = 1.0):
+                   arc_weight: float = 1.0, line_factor: Optional[Dict[int, float]] = None):
     """The weighted residual function of a metre -> pixel homography that the refinement minimises (see
     :func:`refine_homography`), or None when nothing is matched."""
     if len(matches) == 0 and len(arc_matches) == 0:
@@ -1498,7 +1498,8 @@ def _fit_residuals(lines: Sequence[ImageLine], matches: Sequence[LineMatch], mod
         ln = lines[m.image_index]
         ml = model_lines[m.model_name].homogeneous
         for p in (ln.p0, ln.mid, ln.p1):
-            pts.append(p); mabc.append(ml); wts.append(math.sqrt(max(ln.length, 1.0)))
+            factor = line_factor.get(m.image_index, 1.0) if line_factor else 1.0
+            pts.append(p); mabc.append(ml); wts.append(factor * math.sqrt(max(ln.length, 1.0)))
     arc_pts, arc_cm, arc_w = [], [], []
     for am in arc_matches:
         ell = ellipses[am.ellipse_index]
@@ -1549,10 +1550,22 @@ def _h_param(h_m2px: np.ndarray, width: int, height: int, model: PitchModel, cam
     return hn0.reshape(-1)[:8], lambda p: s_px @ np.append(p, 1.0).reshape(3, 3) @ s_m_inv
 
 
+def robust_line_factors(matches: Sequence[LineMatch], width: int, c_frac: float = 0.0004) -> Dict[int, float]:
+    """Per-line factors on the fit's weights (Huber): 1 up to ``c_frac * width`` pixels of residual, then falling.
+
+    The matching tolerance is wide enough to admit a short fragment bent by whatever it touches, and plain
+    least squares lets it pull the whole fit. Removing it outright also removes a constraint, so it keeps a
+    smaller say instead.
+    """
+    c = c_frac * width
+    return {m.image_index: math.sqrt(min(1.0, c / max(m.distance_px, 1e-6))) for m in matches}
+
+
 def refine_homography(h_m2px: np.ndarray, lines: Sequence[ImageLine], matches: Sequence[LineMatch],
                       model: PitchModel = DEFAULT_PITCH, width: int = 1920, height: int = 1080,
                       ellipses: Sequence[ImageEllipse] = (), arc_matches: Sequence[ArcMatch] = (),
-                      arc_weight: float = 1.0, camera: bool = False) -> np.ndarray:
+                      arc_weight: float = 1.0, camera: bool = False,
+                      line_factor: Optional[Dict[int, float]] = None) -> np.ndarray:
     """Levenberg-Marquardt on the 8 free parameters: minimise the pixel distances of
     the matched segments' endpoints and midpoints to the projected model lines and, for matched
     ellipses, the Sampson distances of their points to the projected model circles (each ellipse
@@ -1563,7 +1576,7 @@ def refine_homography(h_m2px: np.ndarray, lines: Sequence[ImageLine], matches: S
     broadcast camera is; a homography that does not decompose into such a camera is returned unrefined."""
     from scipy.optimize import least_squares
 
-    residuals_h = _fit_residuals(lines, matches, model, ellipses, arc_matches, arc_weight)
+    residuals_h = _fit_residuals(lines, matches, model, ellipses, arc_matches, arc_weight, line_factor)
     if residuals_h is None:
         return h_m2px
     par = _h_param(h_m2px, width, height, model, camera)
@@ -2010,6 +2023,23 @@ def calibrate_frame(frame_bgr: np.ndarray, model: PitchModel = DEFAULT_PITCH, pr
             if why:
                 refused.append((status, why, res.verify))
                 return None
+        # Polish only what has already passed, so the decision above is made on the plain fit: down-weighted,
+        # a wrong solution would look better to the verification than it is.
+        polished = hh
+        for _ in range(2):
+            polished = refine_homography(polished, lines, match_lines(polished, lines, model, tau_px=tau), model,
+                                         width=w, height=h, ellipses=ellipses, arc_matches=arcs,
+                                         arc_weight=arc_weight if _families_ok(matches, model, min_inliers) else 1.0,
+                                         camera=camera_fit,
+                                         line_factor=robust_line_factors(match_lines(polished, lines, model, tau_px=tau), w))
+        if np.isfinite(polished).all() and homography_shift_px(hh, polished, w, h) <= tau:
+            m_pol = match_lines(polished, lines, model, tau_px=tau)
+            a_pol = match_arcs(polished, ellipses, model, tau_px=tau)
+            if _families_ok(m_pol, model, min_inliers, a_pol):
+                h_inv = np.linalg.inv(polished)
+                res.h_m2px, res.h_px2m = polished, h_inv / h_inv[2, 2]
+                res.matches, res.arc_matches = m_pol, a_pol
+                res.fit_error_px, res.reprojection_error_m = _errors(polished, lines, m_pol, model, ellipses, a_pol)
         return res
 
     refused: List[Tuple[str, List[str], Dict[str, object]]] = []

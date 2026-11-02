@@ -288,19 +288,19 @@ Thresholds were set on a train tuning set (225 frames of 15 `train.zip` clips);
 the validation set was measured at the end, every 50th frame of all 58 clips,
 with the labelled person boxes standing in for detections:
 
-| Measure (validation, every 50th frame, 870 frames) | Before (2026-10-26) | After (2026-10-29) |
+| Measure (validation, every 50th frame, 870 frames) | Before (2026-10-26) | After (2026-11-02) |
 |---|---|---|
 | Frames claimed | 265 (30%) | 351 (40%) |
 | Claimed frames under 1 m / 1 to 5 m / over 5 m | 25 / 19 / 216 | 338 / 11 / 0 |
 | Precision of the claim (under 1 m) | 0.096 | 0.969 |
-| Labelled people within 1 m, all sampled frames | 3.1% | 38.1% |
+| Labelled people within 1 m, all sampled frames | 3.1% | 37.9% |
 | Foot error on claimed frames, median | 56.5 m | 0.40 m |
 
 Precision against the labels is held down by the labels themselves: on the
 frames where we disagree by 1 to 5 m, our homography usually lies on the painted
 lines and the labels' does not. On a full tracked clip (SNGS-021, 750 frames)
 42% of the frames are claimed and none is over 5 m (the median error was 46 m
-before); its 50 claimed frames at 1 to 5 m are stretches where the camera the
+before); its 49 claimed frames at 1 to 5 m are stretches where the camera the
 labels imply wanders by several metres. Coverage is the open item: 60% of the
 sampled frames are still refused or unsolved, mostly ordinary main-camera views
 with faint, short or partly found markings. Measure with
