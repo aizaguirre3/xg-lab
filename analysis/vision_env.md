@@ -245,6 +245,77 @@ markings), because no SoccerNet clips are available yet. Known limits: one camer
 markings only (the centre circle and arcs are not used), and at least four
 markings in view. The synthetic numbers are an upper bound on real accuracy.
 
+## First real footage: SoccerNet GSR validation, 58 clips (2026-10-26)
+
+**Data.** `SoccerNet/SN-GSR-2025` on Hugging Face is public and not gated (no NDA
+or token needed; the dataset card states licence gpl-3.0; nothing from it is
+committed or redistributed here). It ships one zip per split: `valid.zip` is
+11.2 GB with 58 clips of 750 frames at 1920x1080 (the 2024 edition had 49).
+`varlab_vision/remote_zip.py` reads the zip's directory once (8.5 MB) and range-reads
+one clip at a time (about 200 MB), so no session downloads the whole split.
+
+**Run.** `python colab/run_clips.py --all --split valid --ref <sha> --out data/gsr_pred/valid
+--gpu L4 --no-pose --no-calibration --resume`. Pose was off because GSR has no
+pose labels to score it against; calibration was off on Colab because the Mac
+measurement below showed it does not work on this footage yet, and at about
+0.7 s per frame on the VM it would have cost roughly ten hours of L4. All 58
+clips: 43 min of processing over five L4 sessions; per clip (median) 44 s wall,
+of which download 15 s, JPEG read 8 s, RF-DETR 17 s, ByteTrack 1.3 s, SigLIP
+teams 1 s. Three runner faults surfaced and are fixed: a transient
+`colab download` failure (now retried), a `colab exec` that waited 35 min on an
+idle VM (now a hard local time limit), and a client "Timeout waiting for
+output" during a silent step (now a 20 s heartbeat).
+
+**Detection, tracking, teams** (`tools/eval_gsr_tracking.py`; people = player,
+goalkeeper, referee, other; IoU >= 0.5; tracker output only):
+
+| Metric | All 58 clips | Per clip, median (min to max) |
+|---|---|---|
+| Box precision | 0.946 | 0.956 (0.797 to 0.995) |
+| Box recall | 0.814 | 0.850 (0.639 to 0.944) |
+| Recall: players / goalkeepers / referees | 0.838 / 0.691 / 0.627 | |
+| MOTA | 0.763 | 0.785 (0.485 to 0.932) |
+| IDF1 | 0.628 | 0.625 (0.405 to 0.908) |
+| Tracks predicted vs labelled | 2,957 vs 1,350 (2,867 ID switches) | |
+| Team assignment (player and goalkeeper boxes) | 0.735 | 0.733 (0.529 to 0.968) |
+| Ball found within 15 px / ball detections correct | 0.346 / 0.886 | ball recall 0.327 (0.057 to 0.827) |
+
+The detector is sound (95% precise); recall falls on goalkeepers and referees.
+The tracker splits each labelled person into about 2.2 tracks, so identity is the
+weakest part, and the colour-free SigLIP + k-means team split is right about
+three times in four. The ball is found in about a third of the frames that show it.
+
+**Calibration** (`tools/eval_gsr_calibration.py`, every 50th frame of every clip,
+870 frames, global search per frame on the Mac CPU, compared with the labels'
+own pitch positions, which come from SoccerNet's annotated camera):
+
+| Measure | Result |
+|---|---|
+| Frames calibrated | 265 of 870 (30%) |
+| Calibrated frames with labelled people: median error under 1 m / 1 to 5 m / over 5 m | 25 / 19 / 216 of 260 |
+| Labelled people placed within 1 m, over all sampled frames | 3.1% |
+| Clips whose calibrated frames are right (median under 1 m) | 3 of 58 (SNGS-039, -050, -056) |
+| Seconds per frame (global search) | 0.71 |
+
+The calibration does not work on broadcast footage yet, and worse, most frames
+it reports as calibrated are wrong (over 5 m), which breaks the "never guess"
+rule the synthetic tests enforce. The frames show why: a typical midfield view
+holds the halfway line, one touchline and the centre circle; the method uses
+straight lines only, cuts the circle into straight chords that it then matches
+as markings, reads white shirts as marking pixels, and misses faint distant
+lines with its fixed brightness threshold. On a full tracked clip (SNGS-021,
+750 frames) the median error was 46 m. Until this is fixed the calibrator should
+stay off for real clips (`--no-calibration`).
+
+**Next, in order of what the numbers say:** (1) calibration: mask out detected
+people, find marking pixels by local contrast (white top-hat) inside the grass
+area, reject curved segments, fit the centre circle and penalty arcs as ellipses
+and use them in the homography, and add a consistency check that refuses a
+solution instead of reporting a wrong one; (2) tracking: re-identification or a
+longer ByteTrack buffer to cut the 2.2x fragmentation; (3) a role classifier for
+goalkeepers and referees and a better team split; (4) jersey recognition, which
+GS-HOTA needs. Per-clip numbers: `analysis/gsr_valid_2026-10-26.json`.
+
 ## Two things the first runs taught
 
 1. The Colab kernel already has numpy imported. Pinning `numpy==2.5.4` upgraded

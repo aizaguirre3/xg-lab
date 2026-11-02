@@ -3,10 +3,14 @@
 ``colab exec`` with piped code. Kernel state persists between calls, so models are
 loaded once per session.
 
-Everything is parameterised; nothing here assumes the SoccerNet files exist, and
-the layout of clips inside the Hugging Face dataset repository (``clip_pattern``)
-is unverified until access arrives. When the data is already on the VM (uploaded
-or mounted) pass ``local_root`` to ``process_clip`` and no download happens.
+Data layout (checked 2026-10-26): ``SoccerNet/SN-GSR-2025`` on Hugging Face is
+public and not gated, and ships one zip per split (``valid.zip`` 11.2 GB, 58 clips,
+each clip a top-level ``SNGS-xxx/`` folder with ``Labels-GameState.json`` and
+``img1/``). With ``hf_layout="zip"`` (the default) a clip is read straight out of
+the remote zip with HTTP range requests (``varlab_vision.remote_zip``): about
+200 MB per clip, never the whole split. ``hf_layout="folders"`` keeps the old
+per-clip ``snapshot_download`` with ``clip_pattern``. When the data is already on
+the VM pass ``local_root`` to ``process_clip`` and no download happens.
 
 Camera calibration: ``production_pipeline`` builds a ``FrameCalibrator`` by default
 (classical line detection and a homography search on the CPU, about 0.2 s per
@@ -79,7 +83,7 @@ def _check_numpy_consistent() -> None:
 def setup(ref: str, repo: str = "https://github.com/aizaguirre3/xg-lab.git", detector_size: str = "medium",
           with_pose: bool = True, hf_dataset: str = "SoccerNet/SN-GSR-2025", hf_revision: str = "main",
           clip_pattern: str = "{split}/{clip}/*", device: str | None = None, install: bool = False,
-          gpu_onnxruntime: bool = True, with_calibration: bool = True) -> dict:
+          gpu_onnxruntime: bool = True, with_calibration: bool = True, hf_layout: str = "zip") -> dict:
     """Clone at ``ref``, (optionally) install the pinned requirements, load the models. Idempotent per kernel.
 
     ``install=False`` because colab/run_clips.py installs with ``colab install`` and
@@ -108,7 +112,7 @@ def setup(ref: str, repo: str = "https://github.com/aizaguirre3/xg-lab.git", det
         os.environ["HF_TOKEN"] = token  # huggingface_hub reads it; never printed
         print("HF token: present")
     else:
-        print("HF token: ABSENT (gated dataset downloads will fail)")
+        print("HF token: absent (fine for public datasets such as SoccerNet/SN-GSR-2025)")
 
     import torch
     from varlab_vision.pipeline import production_pipeline
@@ -124,22 +128,55 @@ def setup(ref: str, repo: str = "https://github.com/aizaguirre3/xg-lab.git", det
             pose_dev = "cpu"
     _STATE["pipeline"] = production_pipeline(detector_size=detector_size, device=dev, with_pose=with_pose,
                                              pose_device=pose_dev, with_calibration=with_calibration)
+    if hf_layout not in ("zip", "folders"):
+        raise ValueError(f"hf_layout must be 'zip' or 'folders', got {hf_layout!r}")
     _STATE.update({"head": head, "hf_dataset": hf_dataset, "hf_revision": hf_revision, "clip_pattern": clip_pattern,
-                   "device": dev, "pose_device": pose_dev, "with_calibration": with_calibration})
+                   "device": dev, "pose_device": pose_dev, "with_calibration": with_calibration,
+                   "hf_layout": hf_layout})
     info = {"head": head, "device": dev, "pose_device": pose_dev, "with_calibration": with_calibration,
             "setup_seconds": round(time.time() - t0, 1), "backends": _STATE["pipeline"].backends()}
     print("setup", json.dumps(info))
     return info
 
 
+def _split_zip(split: str):
+    """The split's remote zip, opened once per kernel: ``(ZipFile, RangeFile, {clip: prefix})``."""
+    from varlab_vision.remote_zip import clip_index, hf_dataset_file_url, open_remote_zip
+
+    cache = _STATE.setdefault("zips", {})
+    if split not in cache:
+        url = hf_dataset_file_url(_STATE["hf_dataset"], f"{split}.zip", _STATE["hf_revision"])
+        zf, rf = open_remote_zip(url, token=os.environ.get("HF_TOKEN"),
+                                 log=lambda m: print(f"  [remote zip] {m}", flush=True))
+        cache[split] = (zf, rf, clip_index(zf))
+        print(f"opened {url}: {rf.size / 1e9:.2f} GB, {len(cache[split][2])} clips", flush=True)
+    return cache[split]
+
+
 def _fetch_clip(clip: str, split: str) -> Path:
-    """Download one clip's folder from the dataset repo at the pinned revision; return its directory."""
+    """Put one clip under ``DATA_DIR/<split>/<clip>/`` and return that folder.
+
+    ``hf_layout == "zip"``: range-read it out of ``<split>.zip``. ``"folders"``: download
+    the clip's folder with ``snapshot_download`` and ``clip_pattern``.
+    """
+    if _STATE.get("hf_layout", "zip") == "zip":
+        from varlab_vision.remote_zip import extract_clip
+
+        zf, rf, index = _split_zip(split)
+        before = rf.bytes_fetched
+        t0 = time.time()
+        clip_dir = extract_clip(zf, clip, DATA_DIR / split, index=index)
+        _STATE["last_fetch"] = {"seconds": round(time.time() - t0, 1),
+                                "mb": round((rf.bytes_fetched - before) / 1e6, 1)}
+        return clip_dir
     from huggingface_hub import snapshot_download
 
     pattern = _STATE["clip_pattern"].format(split=split, clip=clip)
     local = DATA_DIR / split
+    t0 = time.time()
     snapshot_download(repo_id=_STATE["hf_dataset"], repo_type="dataset", revision=_STATE["hf_revision"],
                       allow_patterns=[pattern], local_dir=str(local))
+    _STATE["last_fetch"] = {"seconds": round(time.time() - t0, 1), "mb": None}
     for cand in local.rglob(clip):
         if cand.is_dir() and (cand / "img1").is_dir():
             return cand
@@ -147,14 +184,47 @@ def _fetch_clip(clip: str, split: str) -> Path:
                             "check --clip-pattern against the dataset layout")
 
 
+class _Heartbeat:
+    """Print a line every ``every`` seconds while a block runs. ``colab exec`` gives up with
+    "Timeout waiting for output" when the kernel is silent for too long (2026-10-26, during a
+    clip whose download was being retried), so long silent steps must keep talking."""
+
+    def __init__(self, label: str, every: float = 20.0):
+        import threading
+
+        self.label, self.every = label, every
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._t0 = time.time()
+
+    def _run(self):
+        while not self._stop.wait(self.every):
+            print(f"  {self.label}: still working ({time.time() - self._t0:.0f} s)", flush=True)
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._stop.set()
+        self._thread.join(timeout=1.0)
+        return False
+
+
 def process_clip(clip: str, split: str = "valid", local_root: str | None = None, delete_frames: bool = True) -> dict:
     """Run the pipeline on one clip and write ``/content/varlab_out/<split>/<clip>/{Labels-GameState.json,report.json}``."""
+    with _Heartbeat(clip):
+        return _process_clip(clip, split, local_root, delete_frames)
+
+
+def _process_clip(clip: str, split: str, local_root: str | None, delete_frames: bool) -> dict:
     from varlab_vision.gshota import gs_hota
     from varlab_vision.gsr_format import LABELS_FILE
     from varlab_vision.loaders import list_frames, objects_frame, read_gsr_clip
 
     pipe = _STATE["pipeline"]
     t0 = time.time()
+    _STATE.pop("last_fetch", None)
     clip_dir = Path(local_root) / split / clip if local_root else _fetch_clip(clip, split)
     info = None
     if (clip_dir / LABELS_FILE).is_file():
@@ -166,6 +236,7 @@ def process_clip(clip: str, split: str = "valid", local_root: str | None = None,
                            frames=seq, progress=lambda i, n: print(f"  {clip} {i}/{n}", flush=True) if i % 100 == 0 else None)
     rep = report.as_dict()
     rep["head"] = _STATE.get("head"); rep["wall_seconds"] = round(time.time() - t0, 1)
+    rep["download"] = _STATE.get("last_fetch")
     if info is not None:
         gt = objects_frame(read_gsr_clip(clip_dir / LABELS_FILE))
         pred = objects_frame(read_gsr_clip(out_dir / LABELS_FILE))

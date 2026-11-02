@@ -172,7 +172,7 @@ If you had cloned the branch before 2026-10-15, discard that clone or reset it t
 1. Open a pull request to `main` if you want the work merged (the author rewrite in section 7 is done).
 2. Add the StatsBomb logo to the README (licence 1.4).
 3. SkillCorner reader: done (`R/12_read_skillcorner.R`, 2026-10-17). Still to write: an IDSSE reader (TRACAB positions, 25 Hz) that builds the same match bundle for `evaluate_tracking_match()`, and a pose reader for SkillCorner's body-pose files, which give the limb-level offset measurement the scope asked for.
-4. M4/M5 only after SoccerNet access and a 12 to 24 GB GPU are in hand; the stack is listed in `var_vision_scope.md` section 6.
+4. M4/M5: the GSR data needs no NDA (public on Hugging Face, see the 2026-10-26 run below); the first real-footage numbers are in `analysis/vision_env.md`. Calibration must be fixed before M5 (offside line); the stack is listed in `var_vision_scope.md` section 6.
 5. Optional: add xgboost to `R/07_decision_models.R` now that CRAN is reachable, and re-render `analysis/report.qmd` with Quarto if you want the xG report and VAR-Lab in one document.
 
 ### M4 on Colab (added 2026-10-17)
@@ -255,6 +255,20 @@ fitting every frame, so the gain on real clips depends on how steady the camera
 is. `FrameCalibrator(frame_stride=1)` or `update()` fits every frame. Full
 tables are in `analysis/vision_env.md`. Accuracy on real broadcast frames is not
 measured: every number so far comes from synthetic clips.
+
+First real footage (2026-10-26). `SoccerNet/SN-GSR-2025` is public on Hugging Face
+(no NDA or token; one zip per split, `valid.zip` 11.2 GB, 58 clips), and the runner
+range-reads one clip at a time out of it (`--hf-layout zip`, the default; `--all`
+lists the split's clips). All 58 validation clips ran on the L4 with
+`--no-pose --no-calibration` in 43 min of processing, about 44 s per clip. Results
+(`analysis/vision_env.md`, section "First real footage"): box precision 0.946 and
+recall 0.814, MOTA 0.763, IDF1 0.628, team split 0.735, ball found 0.346. The
+calibration does not work on broadcast frames yet (3% of labelled people within
+1 m, mostly wrong locks), so keep `--no-calibration` on real clips until it is
+reworked. Score a run with `tools/eval_gsr_tracking.py` and measure calibration
+with `tools/eval_gsr_calibration.py`; both read the labels from
+`data/gsr_valid/<clip>/Labels-GameState.json` (fetch with
+`varlab_vision.remote_zip.extract_clip(..., labels_only=True)`).
 
 ## 9. Things the cloud session could not verify
 
