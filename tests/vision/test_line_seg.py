@@ -85,3 +85,85 @@ def test_the_network_keeps_the_input_size():
     with torch.inference_mode():
         y = model(torch.from_numpy(ls.to_input(np.zeros((1080, 1920, 3), np.uint8)))[None])
     assert tuple(y.shape) == (1, ls.N_CLASSES, ls.INPUT_SIZE[1], ls.INPUT_SIZE[0])
+
+
+# ----------------------------------------------------------------------------
+# Named lines in the calibration: a perfect label map drawn from the true camera
+# ----------------------------------------------------------------------------
+
+_CLASS_OF = {"touchline_far": "Side line top", "touchline_near": "Side line bottom", "halfway": "Middle line",
+             "goal_line_left": "Side line left", "goal_line_right": "Side line right"}
+
+
+def _class_for(poly_name: str, mid_x: float) -> str:
+    base = poly_name.split("#")[0]
+    if base in _CLASS_OF:
+        return _CLASS_OF[base]
+    side = "left" if mid_x < 0 else "right"
+    rect = "Big rect." if base.startswith("penalty") else "Small rect."
+    part = "main" if "front" in base else "top" if base.endswith("far") else "bottom"
+    return f"{rect} {side} {part}"
+
+
+def _perfect_labels(cam, size=ls.INPUT_SIZE):
+    from varlab_vision.synthetic import project
+
+    lab = np.zeros((size[1], size[0]), np.uint8)
+    sx, sy = size[0] / cam.width, size[1] / cam.height
+    for name, poly in DEFAULT_PITCH.polylines(arc_step_deg=4.0):
+        if name.startswith(("centre_circle", "penalty_arc", "corner")):
+            continue
+        dense = np.concatenate([np.linspace(a, b, 50) for a, b in zip(poly[:-1], poly[1:])])
+        px = project(cam.homography_m2px(), dense) * np.array([sx, sy])
+        k = ls.CLASSES.index(_class_for(name, float(poly[:, 0].mean()))) + 1
+        fp = np.round(px * 16).astype(np.int64).reshape(-1, 1, 2)
+        cv2.polylines(lab, [fp], False, k, thickness=3, shift=4)
+    return lab
+
+
+def _scene():
+    from varlab_vision.synthetic import BroadcastCamera, render_textured, textured_world
+
+    cam = BroadcastCamera(width=640, height=360, hfov_deg=40.0, position=(0.0, 60.0, 22.0), look_at=(-30.0, 0.0))
+    return cam, render_textured(cam, textured_world(seed=3))
+
+
+def _max_error_m(cam, res):
+    xs, ys = np.meshgrid(np.linspace(-52, 52, 27), np.linspace(-34, 34, 18))
+    pts = np.stack([xs.ravel(), ys.ravel()], axis=1)
+    px, depth = cam.project(pts)
+    vis = (depth > 0) & (px[:, 0] >= 0) & (px[:, 0] < cam.width) & (px[:, 1] >= 0) & (px[:, 1] < cam.height)
+    return float(np.linalg.norm(res.project(px[vis]) - pts[vis], axis=1).max())
+
+
+def test_named_lines_give_the_true_homography_and_survive_one_wrong_name():
+    from varlab_vision import calibration as cal
+
+    cam, img = _scene()
+    lines = cal.extract_lines(cal.marking_mask(img))
+    names = ls.name_lines(lines, _perfect_labels(cam), (cam.width, cam.height))
+    assert len(names) >= 4
+    hs = cal.named_line_homographies(lines, names, 640, 360)
+    assert hs and min(cal.homography_shift_px(h, cam.homography_m2px(), 640, 360) for h in hs) < 3.0  # a start: the lines sit around one box
+    wrong = dict(names)
+    i = next(i for i, nm in names.items() if nm == "penalty_front_left")
+    wrong[i] = "halfway"  # one line misnamed (to a name no other line has): a leave-one-out fit is still right
+    shifts = [cal.homography_shift_px(h, cam.homography_m2px(), 640, 360) for h in cal.named_line_homographies(lines, wrong, 640, 360)]
+    assert min(shifts) < 4.0 and max(shifts) > 50.0
+
+
+def test_calibrate_frame_tries_the_named_lines_before_the_search():
+    from varlab_vision import calibration as cal
+
+    cam, img = _scene()
+    calls = []
+
+    def labels():
+        calls.append(1)
+        return _perfect_labels(cam)
+
+    res = cal.calibrate_frame(img, line_labels=labels)
+    assert res.ok and "named lines" in res.note and calls == [1]
+    assert _max_error_m(cam, res) < 0.15
+    fallback = cal.calibrate_frame(img, line_labels=np.zeros((352, 640), np.uint8))  # names nothing: the search decides
+    assert fallback.ok and "global search" in fallback.note
