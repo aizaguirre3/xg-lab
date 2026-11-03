@@ -484,6 +484,45 @@ the +y side, 3 to 50 m up) is GSR's; another dataset may need
 boxes; the detector misses about one person in five (recall 0.81), and a missed
 white shirt can still read as a marking.
 
+## Bridging uncalibrated frames through the camera's motion (2026-11-03)
+
+On a real clip the calibration runs tracked, frame after frame, and most frames it
+cannot fit are not lonely: they sit between frames it did fit, in the same shot.
+The main camera turns and zooms about a fixed point, so one homography maps each
+frame onto the next whatever is in view, and that motion can be measured from the
+image itself (`registration.py`: corners per grid cell, Lucas-Kanade forward and
+back, people masked, RANSAC). `bridge_gaps` carries the fitted frames into the gaps
+through those motions.
+
+**How far a chain of motions drifts.** On train clips SNGS-060 and SNGS-099, with
+cameras fitted to the labelled feet of frames with 14 or more people as the
+reference: a median 0.15 to 0.19 m after 5 frames, 0.29 to 0.31 m after 25, 0.33 to
+0.41 m after 50, 0.46 to 0.76 m after 100 (worst 1.0 m at 25 frames, 3.9 m at 100).
+The motion itself is measured on about 590 corners to 0.08 px; registration costs
+about 9 ms per 1080p frame on the Mac and succeeded on every frame of both clips.
+
+**The rule.** A gap with a fit on both sides is bridged only when the chain carried
+forward and the chain carried back put the same pixels within 1 m of each other on
+every frame of the gap (checked in metres on the gap's own frames: a zoomed-in fit
+is only accurate over what it sees, and carried out to a wide view its error looks
+many times larger), and each frame is blended between the two chains. A gap open
+at one end is bridged for at most 5 frames, unchecked. Cuts and failed motions
+break every chain.
+
+**Tuning (train clips SNGS-060, -064, -072, -099, -103, every frame, tracked).**
+
+| Agreement limit | One-sided cap | Frames claimed | Precision of the claim | People within 1 m | Bridged frames 1 m+ off |
+|---|---|---|---|---|---|
+| no bridging | | 51.0% | 99.3% | 45.6% | |
+| 0.5 m | 5 | 62.5% | 98.8% | 55.9% | 15 of 431 |
+| **1.0 m** | **5** | **66.9%** | **98.8%** | **59.3%** | **16 of 595** |
+| 1.0 m | 25 | 67.9% | 98.6% | 59.9% | 21 of 617 |
+| 3.0 m | 25 | 71.5% | 97.4% | 61.8% | 56 of 770 |
+
+The two-sided bridges that miss sit between fits that were already off (the
+unbridged frames include 14 between 1 and 5 m); none of the bridged frames is
+over 5 m.
+
 ## Two things the first runs taught
 
 1. The Colab kernel already has numpy imported. Pinning `numpy==2.5.4` upgraded
