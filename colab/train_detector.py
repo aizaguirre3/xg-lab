@@ -9,7 +9,7 @@ importing in one kernel mixes numpy versions) -> ``colab exec -f detector_worker
 (prints the package's training API) -> ``prepare`` -> upload the last checkpoint if there is one
 -> ``train(epochs=...)`` -> download the checkpoints -> ``colab stop`` in a ``finally``. The
 package trains every epoch it is given in one call, so ``--epochs`` is the total to reach this
-session: run again with a higher number to resume (``checkpoint.pth`` goes back up first).
+session: run again with a higher number to resume (``last.ckpt`` goes back up first).
 """
 from __future__ import annotations
 
