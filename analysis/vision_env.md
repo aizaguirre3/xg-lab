@@ -592,6 +592,17 @@ each family and a circle; the extractor misses them (faint or broken strokes).
 Seeding the extractor's robust refit from the network's lines is the next step,
 and the network was trained for 9 of its planned 30 rounds.
 
+**With bridging, as the pipeline runs it** (the nine validation clips of the
+bridging section, every frame, tracked; the network runs only on frames whose
+tracking fails, 234 of them solved from named lines):
+
+| | Tracked | + named lines | + named lines + bridging |
+|---|---|---|---|
+| Frames claimed | 51.0% | 54.3% | 77.2% |
+| Precision of the claim | 97.7% | 97.4% | 96.4% |
+| Claimed frames over 5 m | 3 | 3 | 3 |
+| Labelled people within 1 m | 50.5% | 52.1% | 69.9% |
+
 ## Two things the first runs taught
 
 1. The Colab kernel already has numpy imported. Pinning `numpy==2.5.4` upgraded
