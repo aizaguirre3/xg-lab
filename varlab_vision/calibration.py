@@ -65,7 +65,9 @@ broadcast main camera on the ``+y`` side (the verification's camera prior), and 
 that shows enough markings. On every 50th frame of the 58 SoccerNet GSR validation clips
 (``tools/eval_gsr_calibration.py``, numbers in ``analysis/vision_env.md``) it claims 40% of
 the frames, 97% of those with a median error under 1 m against the labels and none over
-5 m, and refuses the rest.
+5 m, and refuses the rest. Run as the pipeline runs it (tracked, every frame) on nine of those
+clips it claims 51.0%, and with ``bridge_gaps`` 71.6% (precision 96.3%, 3 frames over 5 m either
+way), placing 67.4% of the labelled people within 1 m against 50.5% without.
 """
 from __future__ import annotations
 

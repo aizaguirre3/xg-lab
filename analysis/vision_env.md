@@ -523,6 +523,27 @@ The two-sided bridges that miss sit between fits that were already off (the
 unbridged frames include 14 between 1 and 5 m); none of the bridged frames is
 over 5 m.
 
+**Validation (measured once, after the defaults were fixed).** Nine validation
+clips, every 7th of the split by name (SNGS-021, -028, -035, -042, -049, -056,
+-081, -088, -095), every frame, tracked, 6,750 frames
+(`tools/eval_gsr_calibration.py --frames ... --tracked --every 1`):
+
+| | Without bridging | With bridging |
+|---|---|---|
+| Frames claimed | 51.0% | 71.6% |
+| Precision of the claim (median error under 1 m) | 97.7% | 96.3% |
+| Claimed frames 1 to 5 m off / over 5 m | 75 / 3 | 172 / 3 |
+| Labelled people placed within 1 m | 50.5% | 67.4% |
+
+The 1,263 bridged frames with labelled people have a median error of 0.31 m; 92.3%
+are within 1 m and 96.2% within 2 m. Precision drops more than on the train
+clips, and the misses concentrate where the fits themselves were weak: SNGS-021,
+whose fitted frames are only 84% within 1 m, gives 366 bridged frames at 88%;
+SNGS-088 (fits 98%) gives 186 at 84%. On the other seven clips the bridged frames
+are 83 to 100% within 1 m. Tracked calibration, which the pipeline runs, already
+claims more than the from-scratch sample above (51% against 40%); bridging adds
+20.6 points on top. Registration adds about 9 ms per frame.
+
 ## Named pitch lines (2026-11-03)
 
 Where the calibration fails on real frames it is mostly not short of segments: on
