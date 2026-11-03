@@ -49,8 +49,8 @@ def run(args: argparse.Namespace) -> int:
     session.new()
     try:
         session.exec_file(WORKER, timeout=120)
-        session.exec_code(f"setup({args.ref!r})", timeout=600)
-        session.exec_code(f"prepare(every={args.every}, holdout={list(args.holdout)!r})", timeout=1800)
+        session.exec_checked(f"setup({args.ref!r})", timeout=600)
+        session.exec_checked(f"prepare(every={args.every}, holdout={list(args.holdout)!r})", timeout=1800)
         for name in ("ckpt.pt", "best.pt", "log.jsonl"):  # a resumed run carries on from the last chunk
             if (out / name).is_file():
                 session.upload(out / name, f"{REMOTE}/{name}")
@@ -59,7 +59,7 @@ def run(args: argparse.Namespace) -> int:
             if left < args.chunk_min + 3:
                 print(f"[train_line_seg] budget reached ({args.budget_min} min); resume with a new run")
                 break
-            res = session.exec_code(f"r = train(minutes={args.chunk_min}, epochs={args.epochs}); "
+            res = session.exec_checked(f"r = train(minutes={args.chunk_min}, epochs={args.epochs}); "
                                     "print('EPOCH', r['epoch'], 'BEST', r['best_miou'])",
                                     timeout=args.chunk_min * 60 + 600)
             for name in ("ckpt.pt", "best.pt", "log.jsonl"):

@@ -202,3 +202,17 @@ def test_the_runner_enforces_its_own_wall_clock_limit(monkeypatch):
     res = rc.subprocess_runner(hang, stdin_text="ignored")
     assert res.returncode == 124 and "timed out" in res.stderr and res.stdout.strip() == "partial"
     assert time.monotonic() - t0 < 10
+
+
+def test_exec_checked_fails_on_a_traceback_in_the_output():
+    rc = load_module("run_clips")
+
+    def runner(cmd, stdin_text=None):
+        if "boom" in (stdin_text or ""):
+            return rc.CmdResult(0, "Traceback (most recent call last):\n  ...\nValueError: boom", "")
+        return rc.CmdResult(0, "fine", "")
+
+    s = rc.ColabSession("x", "L4", runner)
+    assert s.exec_checked("print(1)", 10).stdout == "fine"
+    with pytest.raises(RuntimeError, match="raised on the VM"):
+        s.exec_checked("boom()", 10)
