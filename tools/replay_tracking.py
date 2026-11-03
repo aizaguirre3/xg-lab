@@ -60,8 +60,9 @@ def replay_clip(cache: dict, name: str, stitch_cfg: StitchConfig | None, team_k:
         tl = tracklets_from_frames(per_frame, cache["to_ref"], cache["shots"], pl.CLASS_PERSON)
         emb = mean_embeddings(tids, feats)
         roles = pl.track_roles(per_frame)
+        teams = pl.fragment_teams(tids, feats, roles, team_k, seed, whiten)
         for t in tl:
-            t.embedding, t.role = emb.get(t.tid), roles.get(t.tid)
+            t.embedding, t.role, t.team = emb.get(t.tid), roles.get(t.tid), teams.get(t.tid)
         id_map = stitch(tl, stitch_cfg)
         per_frame = [(f, w, h, pl._remap_ids(d, id_map)) for f, w, h, d in per_frame]
         tids = [id_map.get(t, t) for t in tids]
