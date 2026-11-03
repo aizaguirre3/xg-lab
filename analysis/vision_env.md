@@ -557,7 +557,9 @@ trained on Colab (`colab/train_line_seg.py`) on every 5th frame of 52 train clip
 (7,650 frames), with a mirrored-pitch flip that swaps left and right names. The
 five calibration tuning clips (SNGS-060, -064, -072, -099, -103) are held out:
 their mean IoU over the classes in view reached 0.72 after 1,800 steps (9 rounds of
-200; about 6 minutes on the L4). The SoccerNet-to-PitchModel name mapping was
+200; about 6 minutes on the L4). Those clips come from games 4 and 6, which other
+train clips also cover, so that IoU flatters the network; the validation games
+(2, 3 and 5) are in no train clip, and the validation numbers below are clean. The SoccerNet-to-PitchModel name mapping was
 checked against cameras fitted to the labelled feet. Its weights stay out of the
 repository (the dataset card says GPL-3.0).
 
