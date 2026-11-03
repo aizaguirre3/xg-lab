@@ -1986,6 +1986,13 @@ def verify_failures(v: Dict[str, object], cfg: VerifyConfig, width: int) -> List
 
 
 DEFAULT_VERIFY = VerifyConfig()
+# A solution from named lines has evidence the blind search lacks: the network said which marking
+# each line is. On 375 frames (every 10th) of the held-out train clips SNGS-060, -064, -072, -099 and
+# -103, the default checks let named solutions add 15 frames to the search's 174 (precision 98.9%);
+# letting up to half of the line length go unexplained (boards and shirts, which a named frame can
+# carry without the fit being a guess) adds 30 at 99.0%. Loosening the standard error at the people
+# to 0.25 m as well adds 76 but at 97.2%, so it is not done.
+NAMED_VERIFY = VerifyConfig(max_unexplained=0.5)
 
 
 def default_tau_px(width: int, tau_px: Optional[float] = None) -> float:
@@ -2001,7 +2008,7 @@ def calibrate_frame(frame_bgr: np.ndarray, model: PitchModel = DEFAULT_PITCH, pr
                     use_arcs: bool = True, ellipse_kw: Optional[dict] = None,
                     verify: Optional[VerifyConfig] = None, arc_weight: float = 0.3,
                     camera_fit: bool = True, max_alternatives: int = 3, search_camera_prior: bool = True,
-                    line_labels=None) -> CalibrationResult:
+                    line_labels=None, named_verify: Optional[VerifyConfig] = None) -> CalibrationResult:
     """Calibrate one frame from scratch, or from ``prior_m2px`` (tracking) with a
     global search as the fallback. ``extra_priors`` are tried after ``prior_m2px``
     (for instance the previous solution when the first prior is an extrapolation)
@@ -2025,7 +2032,8 @@ def calibrate_frame(frame_bgr: np.ndarray, model: PitchModel = DEFAULT_PITCH, pr
 
     ``line_labels`` (a label map from :class:`varlab_vision.line_seg.LineSegmenter`, or a callable
     returning one, called only if the priors fail) names the extracted lines; the homographies from
-    the named lines (:func:`named_line_homographies`) are tried, and verified, before the global search."""
+    the named lines (:func:`named_line_homographies`) are tried, and verified with ``named_verify``
+    (default :data:`NAMED_VERIFY`), before the global search."""
     h, w = frame_bgr.shape[:2]
     tau = default_tau_px(w, tau_px)
     tau_track = track_tau_px if track_tau_px is not None else 4.0 * tau
@@ -2053,7 +2061,7 @@ def calibrate_frame(frame_bgr: np.ndarray, model: PitchModel = DEFAULT_PITCH, pr
                                  note=f"{len(lines)} straight markings and {len(ellipses)} curves found, need 4 lines "
                                       "or 2 lines and a curve")
 
-    def finish(h0: np.ndarray, status: str, note: str) -> Optional[CalibrationResult]:
+    def finish(h0: np.ndarray, status: str, note: str, cfg: VerifyConfig = cfg) -> Optional[CalibrationResult]:
         hh = h0
         for round_tau in (tau_track if status == STATUS_TRACKED else tau * 2.0, tau):
             matches = match_lines(hh, lines, model, tau_px=round_tau)
@@ -2117,7 +2125,8 @@ def calibrate_frame(frame_bgr: np.ndarray, model: PitchModel = DEFAULT_PITCH, pr
         labels = line_labels() if callable(line_labels) else line_labels
         names = name_lines(lines, labels, (w, h)) if labels is not None else {}
         for k, h_named in enumerate(named_line_homographies(lines, names, w, h, model)):
-            res = finish(h_named, STATUS_CALIBRATED, f"from {len(names)} named lines" + (f" (subset {k})" if k else ""))
+            res = finish(h_named, STATUS_CALIBRATED, f"from {len(names)} named lines" + (f" (subset {k})" if k else ""),
+                         named_verify if named_verify is not None else NAMED_VERIFY)
             if res is not None:
                 return res
     ranked: List[Tuple[float, np.ndarray]] = []
