@@ -136,7 +136,7 @@ def train_jersey(minutes: float = 10.0, epochs: int = 15, batch: int = 128, lr: 
         for x, y in tr:
             step = state["epoch"] * len(tr) + nb
             for g in opt.param_groups:
-                g["lr"] = lr * 0.5 * (1 + np.cos(np.pi * min(1.0, step / total_steps)))
+                g["lr"] = float(lr * 0.5 * (1 + np.cos(np.pi * min(1.0, step / total_steps))))  # plain float: resumable
             x, y = x.to(dev), y.to(dev)
             with torch.autocast("cuda", dtype=torch.float16):
                 ln, d1, d2 = model(x)

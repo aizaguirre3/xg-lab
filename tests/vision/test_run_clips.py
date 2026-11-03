@@ -212,3 +212,17 @@ def test_pipeline_keywords_point_at_the_uploaded_weights():
                   "stitch": True}
     with pytest.raises(SystemExit):
         rc.pipeline_keywords('{"jersey_weights": "@missing.pt"}', [])
+
+
+def test_exec_checked_fails_on_a_traceback_in_the_output():
+    rc = load_module("run_clips")
+
+    def runner(cmd, stdin_text=None):
+        if "boom" in (stdin_text or ""):
+            return rc.CmdResult(0, "Traceback (most recent call last):\n  ...\nValueError: boom", "")
+        return rc.CmdResult(0, "fine", "")
+
+    s = rc.ColabSession("x", "L4", runner)
+    assert s.exec_checked("print(1)", 10).stdout == "fine"
+    with pytest.raises(RuntimeError, match="raised on the VM"):
+        s.exec_checked("boom()", 10)

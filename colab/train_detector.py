@@ -63,14 +63,14 @@ def run(args: argparse.Namespace) -> int:
             req.unlink(missing_ok=True)
         session.restart_kernel()
         session.exec_file(WORKER, timeout=120)
-        session.exec_code(f"setup({args.ref!r})", timeout=900)
+        session.exec_checked(f"setup({args.ref!r})", timeout=900)
         if args.setup_only:
             return 0
-        session.exec_code(f"prepare(every={args.every}, holdout={list(args.holdout)!r})", timeout=1800)
+        session.exec_checked(f"prepare(every={args.every}, holdout={list(args.holdout)!r})", timeout=1800)
         if (out / "checkpoint.pth").is_file():
             session.exec_code(f"import os; os.makedirs({REMOTE!r}, exist_ok=True)", timeout=60)
             session.upload(out / "checkpoint.pth", f"{REMOTE}/checkpoint.pth")
-        session.exec_code(f"train(epochs={args.epochs}, batch_size={args.batch_size}, grad_accum_steps={args.grad_accum}, "
+        session.exec_checked(f"train(epochs={args.epochs}, batch_size={args.batch_size}, grad_accum_steps={args.grad_accum}, "
                           f"lr={args.lr}, resolution={args.resolution})", timeout=args.train_timeout_min * 60)
         for name in OUTPUTS:
             try:

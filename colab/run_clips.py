@@ -159,6 +159,14 @@ class ColabSession:
     def exec_code(self, code: str, timeout: float) -> CmdResult:
         return self._run("exec", "-s", self.name, "--timeout", str(timeout), stdin_text=code)
 
+    def exec_checked(self, code: str, timeout: float) -> CmdResult:
+        """``exec_code`` that also fails when the code raised in the kernel: ``colab exec`` returns 0 and
+        prints the traceback (2026-11-03: a training loop retried the same failing resume for minutes)."""
+        res = self.exec_code(code, timeout)
+        if "Traceback (most recent call last)" in res.stdout + res.stderr:
+            raise RuntimeError(f"code raised on the VM: {(res.stdout + res.stderr).strip()[-800:]}")
+        return res
+
     def upload(self, local: Path, remote: str) -> None:
         self._run("upload", "-s", self.name, str(local), remote)
 

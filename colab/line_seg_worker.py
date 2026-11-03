@@ -202,7 +202,8 @@ def train(minutes: float = 8.0, epochs: int = 30, batch: int = 16, lr: float = 1
         for x, y in tr:
             step = state["epoch"] * len(tr) + nb
             for g in opt.param_groups:
-                g["lr"] = lr * 0.5 * (1 + np.cos(np.pi * min(1.0, step / sched_total)))
+                g["lr"] = float(lr * 0.5 * (1 + np.cos(np.pi * min(1.0, step / sched_total))))  # a numpy float
+                # in the optimizer state stops torch.load(weights_only=True) from resuming the checkpoint
             x, y = x.to(dev, non_blocking=True), y.to(dev, non_blocking=True)
             with torch.autocast("cuda", dtype=torch.float16):
                 loss = loss_fn(model(x), y)

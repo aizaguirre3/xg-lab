@@ -48,8 +48,8 @@ def run(args: argparse.Namespace) -> int:
     try:
         session.exec_file(HERE / "line_seg_worker.py", timeout=120)
         session.exec_file(HERE / "jersey_worker.py", timeout=120)
-        session.exec_code(f"setup({args.ref!r})", timeout=600)
-        session.exec_code(f"prepare_jersey(every={args.every}, holdout={list(args.holdout)!r})", timeout=1800)
+        session.exec_checked(f"setup({args.ref!r})", timeout=600)
+        session.exec_checked(f"prepare_jersey(every={args.every}, holdout={list(args.holdout)!r})", timeout=1800)
         for name in ("ckpt.pt", "best.pt", "log.jsonl"):
             if (out / name).is_file():
                 session.upload(out / name, f"{REMOTE}/{name}")
@@ -57,7 +57,7 @@ def run(args: argparse.Namespace) -> int:
             if args.budget_min - (time.monotonic() - t0) / 60.0 < args.chunk_min + 3:
                 print(f"[train_jersey] budget reached ({args.budget_min} min); resume with a new run")
                 break
-            res = session.exec_code(f"r = train_jersey(minutes={args.chunk_min}, epochs={args.epochs}); "
+            res = session.exec_checked(f"r = train_jersey(minutes={args.chunk_min}, epochs={args.epochs}); "
                                     "print('EPOCH', r['epoch'], 'BEST', r['best'])", timeout=args.chunk_min * 60 + 600)
             for name in ("ckpt.pt", "best.pt", "log.jsonl"):
                 session.download(f"{REMOTE}/{name}", out / name)
