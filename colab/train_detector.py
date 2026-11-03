@@ -70,8 +70,12 @@ def run(args: argparse.Namespace) -> int:
         if (out / "checkpoint.pth").is_file():
             session.exec_code(f"import os; os.makedirs({REMOTE!r}, exist_ok=True)", timeout=60)
             session.upload(out / "checkpoint.pth", f"{REMOTE}/checkpoint.pth")
-        session.exec_checked(f"train(epochs={args.epochs}, batch_size={args.batch_size}, grad_accum_steps={args.grad_accum}, "
-                          f"lr={args.lr}, resolution={args.resolution})", timeout=args.train_timeout_min * 60)
+        try:
+            session.exec_checked(f"train(epochs={args.epochs}, batch_size={args.batch_size}, "
+                                 f"grad_accum_steps={args.grad_accum}, lr={args.lr}, resolution={args.resolution})",
+                                 timeout=args.train_timeout_min * 60)
+        except RuntimeError as e:  # timed out or raised: the epochs that finished are on the VM, take them
+            print(f"[train_detector] training stopped early: {str(e)[-400:]}")
         for name in OUTPUTS:
             try:
                 session.download(f"{REMOTE}/{name}", out / name)
