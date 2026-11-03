@@ -38,10 +38,16 @@ frame without a calibration and on any box whose projection is not finite, so
 the JSON never contains NaN or Infinity. ``has_labeled_camera`` on the image
 record is true only when that frame's calibration is usable.
 
-Known placeholders, to be replaced in later M4 work: every tracked person is
-written with role ``player`` (no referee / goalkeeper classifier yet); the two
-colour clusters are named ``left`` / ``right`` by their mean image x, not by
-pitch side; jersey numbers are always null.
+Roles, teams and numbers. With a detector fine-tuned on the GSR roles
+(``RFDETRDetector(weights=..., classes=...)``) each track takes its majority role
+(otherwise every person is written as ``player``); only outfield players are
+clustered into the two teams, a goalkeeper joins the side of the half they stand
+in, referees get no team, and the sides are named on the pitch when the frames
+are calibrated (by mean image x otherwise). A ``MotionCompensatedTracker`` tracks
+in the coordinates of each shot's reference frame, and with ``stitch`` the track
+fragments are re-linked by place, time and appearance before the teams
+(``stitching.py``). A ``jersey_reader`` gives each track a number from its crops
+(``jersey.py``); without one, jersey numbers are null.
 """
 from __future__ import annotations
 
@@ -102,6 +108,8 @@ class FrameDetections:
     team: Optional[np.ndarray] = None            # (N,) object: "left" | "right" | None
     keypoints: Optional[np.ndarray] = None       # (N, K, 2)
     keypoint_scores: Optional[np.ndarray] = None  # (N, K)
+    role: Optional[np.ndarray] = None             # (N,) object: "player" | "goalkeeper" | "referee" | "other" | None,
+    #                                               from a detector trained on the GSR roles
 
     @classmethod
     def empty(cls) -> "FrameDetections":
@@ -117,7 +125,7 @@ class FrameDetections:
         return FrameDetections(xyxy=self.xyxy[mask], confidence=self.confidence[mask],
                                class_name=self.class_name[mask], tracker_id=pick(self.tracker_id),
                                team=pick(self.team), keypoints=pick(self.keypoints),
-                               keypoint_scores=pick(self.keypoint_scores))
+                               keypoint_scores=pick(self.keypoint_scores), role=pick(self.role))
 
 
 def crop(frame: np.ndarray, xyxy: Sequence[float], pad: int = 0) -> np.ndarray:
@@ -227,7 +235,8 @@ class RFDETRDetector:
     SIZES = ("nano", "small", "medium", "large")
 
     def __init__(self, size: str = "medium", threshold: float = 0.5, device: Optional[str] = None,
-                 keep_ball: bool = True):
+                 keep_ball: bool = True, weights: Optional[str] = None, classes: Optional[Dict[int, str]] = None,
+                 ball_threshold: Optional[float] = None):
         if size not in self.SIZES:
             raise ValueError(f"size must be one of {self.SIZES} (the Apache-2.0 models), got {size!r}")
         import rfdetr
@@ -237,28 +246,49 @@ class RFDETRDetector:
         kw: Dict[str, Any] = {}
         if device is not None:
             kw["device"] = device
+        if weights is not None:  # fine-tuned on the GSR roles (colab/train_detector.py); ``classes`` maps its ids
+            kw["pretrain_weights"] = weights
         self.model = cls(**kw)
         self.threshold = threshold
+        self.ball_threshold = threshold if ball_threshold is None else ball_threshold
         self.keep_ball = keep_ball
+        self.classes = classes
         self.size = size
-        self.name = f"rf-detr-{size}"
+        self.name = f"rf-detr-{size}" + ("-gsr" if weights is not None else "")
 
     def detect(self, frame_bgr: np.ndarray) -> FrameDetections:
         import cv2
 
         rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        det = self.model.predict(rgb, threshold=self.threshold, include_source_image=False)
+        det = self.model.predict(rgb, threshold=min(self.threshold, self.ball_threshold), include_source_image=False)
         if det is None or len(det) == 0:
             return FrameDetections.empty()
+        if self.classes is not None:
+            return self._with_roles(det)
         cls_id = np.asarray(det.class_id)
         is_person = cls_id == COCO_PERSON_ID
         keep = is_person | (cls_id == COCO_SPORTS_BALL_ID) if self.keep_ball else is_person
         if not keep.any():
             return FrameDetections.empty()
         names = np.where(is_person, CLASS_PERSON, CLASS_BALL).astype(object)
-        return FrameDetections(xyxy=np.asarray(det.xyxy, float)[keep],
-                               confidence=np.asarray(det.confidence, float)[keep],
-                               class_name=names[keep])
+        conf = np.asarray(det.confidence, float)
+        keep &= conf >= np.where(is_person, self.threshold, self.ball_threshold)
+        return FrameDetections(xyxy=np.asarray(det.xyxy, float)[keep], confidence=conf[keep], class_name=names[keep])
+
+    def _with_roles(self, det) -> FrameDetections:
+        """Detections of a model trained on the GSR roles: people carry their role, the ball is the
+        ball (only the most confident one: there is one ball)."""
+        role = np.array([self.classes.get(int(c)) for c in np.asarray(det.class_id)], dtype=object)
+        conf = np.asarray(det.confidence, float)
+        is_ball = role == "ball"
+        is_person = np.isin(role, ("player", "goalkeeper", "referee", "other"))
+        keep = is_person & (conf >= self.threshold)
+        if self.keep_ball and np.any(is_ball & (conf >= self.ball_threshold)):
+            b = int(np.argmax(np.where(is_ball, conf, -1.0)))
+            keep[b] = True
+        names = np.where(is_ball, CLASS_BALL, CLASS_PERSON).astype(object)
+        return FrameDetections(xyxy=np.asarray(det.xyxy, float)[keep], confidence=conf[keep], class_name=names[keep],
+                               role=np.where(is_ball, None, role).astype(object)[keep])
 
 
 # ----------------------------------------------------------------------------
@@ -277,10 +307,16 @@ def _iou_matrix(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     return inter / (area_a[:, None] + area_b[None, :] - inter + 1e-9)
 
 
+def _remap_ids(dets: FrameDetections, id_map: Dict[int, int]) -> FrameDetections:
+    if dets.tracker_id is None:
+        return dets
+    return _with_ids(dets, np.array([id_map.get(int(t), int(t)) for t in dets.tracker_id], dtype=int))
+
+
 def _with_ids(dets: FrameDetections, ids: np.ndarray) -> FrameDetections:
     return FrameDetections(xyxy=dets.xyxy, confidence=dets.confidence, class_name=dets.class_name,
                            tracker_id=ids, team=dets.team, keypoints=dets.keypoints,
-                           keypoint_scores=dets.keypoint_scores)
+                           keypoint_scores=dets.keypoint_scores, role=dets.role)
 
 
 class GreedyIoUTracker:
@@ -374,6 +410,58 @@ class ByteTrackTracker:
                     ids[p_idx[i]] = int(tid) + 1
         ids[np.asarray(dets.class_name) == CLASS_BALL] = BALL_TRACK_ID
         return _with_ids(dets, ids)
+
+
+def _warp_boxes(xyxy: np.ndarray, h: np.ndarray) -> np.ndarray:
+    """Axis-aligned boxes around the four corners of each box mapped by the homography ``h``."""
+    b = np.asarray(xyxy, float).reshape(-1, 4)
+    if len(b) == 0:
+        return b
+    corners = np.stack([b[:, [0, 1]], b[:, [2, 1]], b[:, [0, 3]], b[:, [2, 3]]], axis=1).reshape(-1, 2)
+    hom = np.concatenate([corners, np.ones((len(corners), 1))], axis=1) @ np.asarray(h, float).T
+    p = (hom[:, :2] / hom[:, 2:3]).reshape(-1, 4, 2)
+    return np.concatenate([p.min(axis=1), p.max(axis=1)], axis=1)
+
+
+class MotionCompensatedTracker:
+    """Any tracker run in the coordinates of a reference frame instead of the moving camera's.
+
+    ``update(dets, frame, motion=...)`` takes the camera's motion into this frame (a
+    :class:`~varlab_vision.registration.Motion`, previous pixels -> these pixels), keeps the
+    map from this frame's pixels to the reference frame's, and hands the tracker the
+    detections' boxes mapped there; the ids come back on the original boxes. A pan then moves
+    nobody, so the tracker's constant-velocity prediction only has the players' own motion to
+    follow. A missing or failed motion leaves the map where it was (a blurred frame). With
+    ``new_shot`` (a cut) the new shot gets a reference of its own, placed far from the last one,
+    so the tracks of the old shot cannot claim boxes of the new one and simply expire (resetting
+    the tracker instead would restart its ids and hand out duplicates).
+    """
+
+    SHOT_OFFSET_PX = 1.0e5
+
+    def __init__(self, tracker: "Tracker"):
+        self.tracker = tracker
+        self.name = f"{getattr(tracker, 'name', 'tracker')}+cmc"
+        self.reset()
+
+    def reset(self) -> None:
+        self.tracker.reset()
+        self._to_ref = np.eye(3)
+        self._shot = 0
+
+    def update(self, dets: FrameDetections, frame_bgr: Optional[np.ndarray] = None, motion=None,
+               new_shot: bool = False) -> FrameDetections:
+        if new_shot:
+            self._shot += 1
+            self._to_ref = np.array([[1.0, 0.0, self.SHOT_OFFSET_PX * self._shot], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
+        elif motion is not None and getattr(motion, "ok", False):
+            m = self._to_ref @ np.linalg.inv(motion.h)
+            self._to_ref = m / m[2, 2]
+        moved = FrameDetections(xyxy=_warp_boxes(dets.xyxy, self._to_ref), confidence=dets.confidence,
+                                class_name=dets.class_name, team=dets.team, keypoints=dets.keypoints,
+                                keypoint_scores=dets.keypoint_scores, role=dets.role)
+        out = self.tracker.update(moved, frame_bgr)
+        return _with_ids(dets, out.tracker_id)
 
 
 def default_tracker(frame_rate: float = 25.0) -> Tracker:
@@ -480,6 +568,66 @@ class KMeansTeams:
             raise RuntimeError("fit first")
         d = ((np.asarray(x, float)[:, None, :] - self.centers[None, :, :]) ** 2).sum(axis=2)
         return d.argmin(axis=1)
+
+
+def track_roles(per_frame) -> Dict[int, str]:
+    """Majority detector role of each track (tracks whose detector gave no roles are left out)."""
+    votes: Dict[int, Dict[str, int]] = {}
+    for _f, _w, _h, d in per_frame:
+        if d.role is None or d.tracker_id is None:
+            continue
+        for t, r in zip(d.tracker_id, d.role):
+            if int(t) > 0 and r:
+                v = votes.setdefault(int(t), {})
+                v[r] = v.get(r, 0) + 1
+    return {t: max(v, key=v.get) for t, v in votes.items()}
+
+
+def track_pitch_x(per_frame, calib) -> Dict[int, float]:
+    """Median pitch x (metres) of each track's feet over its calibrated frames."""
+    xs: Dict[int, List[float]] = {}
+    for (_f, _w, _h, d), res in zip(per_frame, calib):
+        if res is None or not res.ok or d.tracker_id is None or not len(d):
+            continue
+        mid = res.project_boxes(d.xyxy)["middle"][:, 0]
+        for t, x in zip(d.tracker_id, mid):
+            if int(t) > 0 and np.isfinite(x):
+                xs.setdefault(int(t), []).append(float(x))
+    return {t: float(np.median(v)) for t, v in xs.items()}
+
+
+def assign_teams(track_ids: np.ndarray, cluster: np.ndarray, mean_x: np.ndarray,
+                 roles: Optional[Dict[int, str]] = None, pitch_x: Optional[Dict[int, float]] = None) -> Dict[int, str]:
+    """Team per track from the clustered crops of the outfield players, sides named on the pitch.
+
+    ``cluster`` holds the k-means cluster of each crop (only crops of tracks whose role is ``player``
+    should have been clustered when roles are known; the rest carry -1). Each player track takes the
+    majority cluster of its crops. SoccerNet's ``left`` is the team defending the left goal (its
+    goalkeeper stands at x of -50 to -47 m, its players' mean x is below the other team's in a median
+    95% of frames on the validation clips), so with pitch positions the cluster whose tracks have the
+    lower median x is ``left``; without, the lower mean image x stands in, as before. A goalkeeper
+    takes the side of the half they stand in (no cluster: their kit matches neither team); referees
+    and others get no team.
+    """
+    track_ids = np.asarray(track_ids); cluster = np.asarray(cluster); mean_x = np.asarray(mean_x, float)
+    roles = roles or {}
+    per_track: Dict[int, int] = {}
+    for t in np.unique(track_ids):
+        votes = cluster[(track_ids == t) & (cluster >= 0)]
+        if len(votes) and roles.get(int(t), "player") == "player":
+            per_track[int(t)] = int(np.bincount(votes, minlength=2).argmax())
+    on_pitch = {j: [pitch_x[t] for t, c in per_track.items() if c == j and pitch_x and t in pitch_x] for j in (0, 1)}
+    if all(on_pitch[j] for j in (0, 1)):
+        side = {j: float(np.median(on_pitch[j])) for j in (0, 1)}
+    else:
+        side = {j: (mean_x[cluster == j].mean() if np.any(cluster == j) else np.inf) for j in (0, 1)}
+    order = sorted((0, 1), key=lambda j: side[j])
+    name_of = {order[0]: "left", order[1]: "right"}
+    out = {t: name_of[c] for t, c in per_track.items()}
+    for t, r in roles.items():
+        if r == "goalkeeper" and pitch_x and t in pitch_x:
+            out[t] = "left" if pitch_x[t] < 0 else "right"
+    return out
 
 
 def assign_teams_by_track(track_ids: np.ndarray, cluster: np.ndarray, mean_x: np.ndarray,
@@ -616,7 +764,8 @@ class VisionPipeline:
                  embedder: Optional[CropEmbedder] = None, pose: Optional[PoseEstimator] = None,
                  projector: Optional[PitchProjector] = None, frame_rate: float = 25.0,
                  max_crops_per_track: int = 20, team_k: int = 2, seed: int = 0,
-                 calibrator: Optional["FrameCalibrator"] = None):
+                 calibrator: Optional["FrameCalibrator"] = None, crop_every: int = 10, stitch=None,
+                 jersey_reader=None):
         self.detector = detector
         self.tracker = tracker if tracker is not None else default_tracker(frame_rate)
         self.embedder = embedder
@@ -627,6 +776,11 @@ class VisionPipeline:
         self.max_crops_per_track = max_crops_per_track
         self.team_k = team_k
         self.seed = seed
+        self.crop_every = crop_every  # frames between the crops kept of one track (its first frame always)
+        self.stitch = stitch  # a stitching.StitchConfig: re-link track fragments before the teams (needs the
+        # motion-compensated tracker for positions that ignore the pan)
+        self.jersey_reader = jersey_reader  # a jersey.JerseyReader: a number per track from its crops
+        self._registrar, self._motion, self._shot_sig = None, None, None  # set per clip with a motion-compensated tracker
 
     def backends(self) -> Dict[str, str]:
         return {
@@ -644,7 +798,10 @@ class VisionPipeline:
         dets = self.detector.detect(frame_bgr)
         timers["detect"].add(time.perf_counter() - t0, 1)
         t0 = time.perf_counter()
-        dets = self.tracker.update(dets, frame_bgr)
+        if isinstance(self.tracker, MotionCompensatedTracker):
+            dets = self._compensated_update(dets, frame_bgr)
+        else:
+            dets = self.tracker.update(dets, frame_bgr)
         timers["track"].add(time.perf_counter() - t0, 1)
         if self.pose is not None:
             t0 = time.perf_counter()
@@ -657,6 +814,24 @@ class VisionPipeline:
             dets.keypoints, dets.keypoint_scores = kps, sc
             timers["pose"].add(time.perf_counter() - t0, 1)
         return dets
+
+    def _compensated_update(self, dets: FrameDetections, frame_bgr: np.ndarray) -> FrameDetections:
+        """The camera's motion into this frame (measured once, kept for the calibrator) and the
+        shot-cut test, then the motion-compensated tracker."""
+        from .calibration import CUT_GREY_THRESHOLD, CUT_HIST_THRESHOLD, shot_change, shot_signature
+        from .registration import FrameRegistrar
+
+        if self._registrar is None:
+            self._registrar = FrameRegistrar()
+        people = np.asarray(dets.xyxy, float).reshape(-1, 4)[np.asarray(dets.class_name) == CLASS_PERSON]
+        self._motion = self._registrar.push(frame_bgr, people)
+        sig = shot_signature(frame_bgr)
+        cut = False
+        if self._shot_sig is not None:
+            grey, hist = shot_change(self._shot_sig, sig)
+            cut = grey >= CUT_GREY_THRESHOLD or hist >= CUT_HIST_THRESHOLD
+        self._shot_sig = sig
+        return self.tracker.update(dets, frame_bgr, motion=self._motion, new_shot=cut)
 
     def _calibrate(self, frame_bgr: Optional[np.ndarray], person_boxes: Optional[np.ndarray] = None) -> List["CalibrationResult"]:
         """One calibrator step: the results that became final with this frame, in frame order (none
@@ -671,8 +846,11 @@ class VisionPipeline:
         held = int(getattr(self.calibrator, "n_pending", 0)) if push is not None else 0
         step = push if push is not None else self.calibrator.update
         kw = {}
-        if person_boxes is not None and "person_boxes" in inspect.signature(step).parameters:
+        params = inspect.signature(step).parameters
+        if person_boxes is not None and "person_boxes" in params:
             kw["person_boxes"] = person_boxes
+        if self._registrar is not None and "motion" in params:  # measured once, for the tracker
+            kw["motion"] = self._motion
         try:
             if frame_bgr is None:
                 return self.calibrator.flush() if push is not None else []
@@ -688,7 +866,7 @@ class VisionPipeline:
     # -- whole clip ---------------------------------------------------------
     def run_clip(self, clip_dir: Path | str, out_path: Path | str, clip_name: Optional[str] = None,
                  game_id: str = "", frames: Optional[FrameSequence] = None,
-                 progress: Optional[Callable[[int, int], None]] = None) -> RunReport:
+                 progress: Optional[Callable[[int, int], None]] = None, cache_path: Optional[Path | str] = None) -> RunReport:
         import cv2
 
         clip_dir = Path(clip_dir)
@@ -696,6 +874,7 @@ class VisionPipeline:
         name = clip_name or clip_dir.name
         timers = {k: StageTimer() for k in ("read", "detect", "track", "pose", "calib", "team", "write", "total")}
         self.tracker.reset()
+        self._registrar, self._motion, self._shot_sig = None, None, None
         if self.calibrator is not None:
             self.calibrator.reset()
         t_all = time.perf_counter()
@@ -703,8 +882,9 @@ class VisionPipeline:
         per_frame: List[Tuple[int, int, int, FrameDetections]] = []  # (frame_idx, w, h, dets)
         calib: List["CalibrationResult"] = []
         crops: Dict[int, List[Tuple[int, np.ndarray, float]]] = {}  # track -> [(frame, crop, cx)]
+        to_ref: List[np.ndarray] = []  # per frame: its pixels -> its shot's reference frame (motion-compensated tracker)
+        shots: List[int] = []
         n = len(seq)
-        stride = max(1, n // self.max_crops_per_track)
         for k, (fidx, path) in enumerate(seq):
             t0 = time.perf_counter()
             frame = cv2.imread(str(path), cv2.IMREAD_COLOR)
@@ -714,18 +894,21 @@ class VisionPipeline:
             dets = self.process_frame(frame, timers)
             h, w = frame.shape[:2]
             per_frame.append((fidx, w, h, dets))
+            cmc = isinstance(self.tracker, MotionCompensatedTracker)
+            to_ref.append(self.tracker._to_ref.copy() if cmc else np.eye(3))
+            shots.append(self.tracker._shot if cmc else 0)
             if self.calibrator is not None:
                 t0 = time.perf_counter()
                 people = np.asarray(dets.class_name) == CLASS_PERSON
                 calib.extend(self._calibrate(frame, np.asarray(dets.xyxy, float).reshape(-1, 4)[people]))
                 timers["calib"].add(time.perf_counter() - t0, 1)
-            if self.embedder is not None and dets.tracker_id is not None and k % stride == 0:
+            if self.embedder is not None and dets.tracker_id is not None:
                 for i in range(len(dets)):
                     tid = int(dets.tracker_id[i])
                     if tid <= 0 or dets.class_name[i] != CLASS_PERSON:
                         continue
                     lst = crops.setdefault(tid, [])
-                    if len(lst) < self.max_crops_per_track:
+                    if len(lst) < self.max_crops_per_track and (not lst or fidx - lst[-1][0] >= self.crop_every):
                         cx = float((dets.xyxy[i, 0] + dets.xyxy[i, 2]) / 2)
                         lst.append((fidx, crop(frame, dets.xyxy[i]).copy(), cx))
             if progress is not None:
@@ -739,7 +922,7 @@ class VisionPipeline:
                 calib = bridge(calib)
             timers["calib"].add(time.perf_counter() - t0, 0)
 
-        # Team assignment over the whole clip.
+        # Appearance of every kept crop, then the track fragments re-linked, then the teams.
         team_of: Dict[int, str] = {}
         notes: List[str] = []
         if self.embedder is not None:
@@ -748,17 +931,51 @@ class VisionPipeline:
             for tid, lst in crops.items():
                 for _fidx, c, cx in lst:
                     tids.append(tid); imgs.append(c); cxs.append(cx)
-            if len(imgs) >= self.team_k and len(set(tids)) >= self.team_k:
-                feats = self.embedder.embed(imgs)
-                km = KMeansTeams(k=self.team_k, seed=self.seed).fit(feats)
-                team_of = assign_teams_by_track(np.array(tids), km.predict(feats), np.array(cxs))
+            feats = self.embedder.embed(imgs) if imgs else np.zeros((0, 1))
+            if cache_path is not None:  # what stitching and the teams start from, to tune them offline
+                import pickle
+
+                with open(cache_path, "wb") as fh:
+                    pickle.dump({"per_frame": per_frame, "to_ref": to_ref, "shots": shots, "tids": tids,
+                                 "feats": np.asarray(feats, np.float32), "cxs": cxs,
+                                 "calib": [(r.status, r.h_m2px) for r in calib], "backends": self.backends()}, fh)
+            if self.stitch is not None and isinstance(self.tracker, MotionCompensatedTracker) and imgs:
+                from .stitching import mean_embeddings, stitch, tracklets_from_frames
+
+                tl = tracklets_from_frames(per_frame, to_ref, shots, CLASS_PERSON)
+                emb = mean_embeddings(tids, feats)
+                roles_before = track_roles(per_frame)
+                for t in tl:
+                    t.embedding = emb.get(t.tid)
+                    t.role = roles_before.get(t.tid)
+                id_map = stitch(tl, self.stitch)
+                n_before = len(tl)
+                per_frame = [(f, w_, h_, _remap_ids(d, id_map)) for f, w_, h_, d in per_frame]
+                tids = [id_map.get(t, t) for t in tids]
+                notes.append(f"stitching: {n_before} track fragments -> {len(set(id_map.values()))} tracks")
+            roles = track_roles(per_frame)
+            outfield = np.array([roles.get(t, "player") == "player" for t in tids], bool)
+            if int(outfield.sum()) >= self.team_k and len({t for t, o in zip(tids, outfield) if o}) >= self.team_k:
+                km = KMeansTeams(k=self.team_k, seed=self.seed).fit(feats[outfield])
+                cluster = np.full(len(tids), -1)
+                cluster[outfield] = km.predict(feats[outfield])
+                px = track_pitch_x(per_frame, calib) if self.calibrator is not None else None
+                team_of = assign_teams(np.array(tids), cluster, np.array(cxs), roles=roles, pitch_x=px)
             else:
                 notes.append(f"team assignment skipped: {len(set(tids))} tracks, {len(imgs)} crops")
             timers["team"].add(time.perf_counter() - t0, len(imgs))
+        jersey_of: Dict[int, str] = {}
+        if self.jersey_reader is not None and self.embedder is not None and imgs:
+            by_track: Dict[int, List[np.ndarray]] = {}
+            for t, c in zip(tids, imgs):
+                by_track.setdefault(int(t), []).append(c)
+            jersey_of = self.jersey_reader.read(by_track)
+            notes.append(f"jersey numbers read for {len(jersey_of)} of {len(by_track)} tracks")
 
         # Write the GSR-layout JSON.
         t0 = time.perf_counter()
-        clip = self._to_gsr(name, game_id, per_frame, team_of, calib if self.calibrator is not None else None)
+        clip = self._to_gsr(name, game_id, per_frame, team_of, calib if self.calibrator is not None else None,
+                            track_roles(per_frame), jersey_of)
         out_path = Path(out_path)
         write_labels_json(clip, out_path)
         timers["write"].add(time.perf_counter() - t0, 1)
@@ -777,8 +994,10 @@ class VisionPipeline:
                          stages=timers, backends=self.backends(), notes=notes, calibration=summary)
 
     def _to_gsr(self, name: str, game_id: str, per_frame, team_of: Dict[int, str],
-                calib: Optional[List["CalibrationResult"]] = None) -> GSRClip:
-        """Build the clip. ``calib`` is None without a calibrator, else one result per frame, in order."""
+                calib: Optional[List["CalibrationResult"]] = None, roles: Optional[Dict[int, str]] = None,
+                jerseys: Optional[Dict[int, str]] = None) -> GSRClip:
+        """Build the clip. ``calib`` is None without a calibrator, else one result per frame, in order.
+        ``roles`` (track -> majority detector role) replaces the ``player`` placeholder where known."""
         if calib is not None and len(calib) != len(per_frame):
             raise ValueError(f"{len(calib)} calibration results for {len(per_frame)} frames")
         cats = parse_categories(default_categories_list())
@@ -813,7 +1032,7 @@ class VisionPipeline:
                 x1, y1, x2, y2 = map(float, dets.xyxy[i])
                 tid = int(dets.tracker_id[i]) if dets.tracker_id is not None else UNASSIGNED
                 is_ball = dets.class_name[i] == CLASS_BALL
-                role = ROLE_BALL if is_ball else ROLE_PLAYER
+                role = ROLE_BALL if is_ball else (roles or {}).get(tid) or ROLE_PLAYER
                 # One finite check decides bbox_pitch and pitch_x / pitch_y together, so a box whose
                 # projection is NaN or infinite (a corner on the horizon) is null in both and the
                 # JSON never holds a NaN.
@@ -837,7 +1056,7 @@ class VisionPipeline:
                     id=new_annotation_id(image_id, i + 1), image_id=image_id,
                     track_id=None if tid == UNASSIGNED else tid,
                     category_id=category_id_for_role(role, cats), role=role,
-                    team=None if is_ball else team_of.get(tid), jersey=None,
+                    team=None if is_ball else team_of.get(tid), jersey=None if is_ball else (jerseys or {}).get(tid),
                     bbox_image=BBoxImage(x=x1, y=y1, w=x2 - x1, h=y2 - y1),
                     bbox_pitch=bbox_pitch, extra=extra))
         info = ClipInfo(name=name, game_id=game_id, clip_id=clip_id, version="1.3", frame_rate=self.frame_rate,
@@ -881,23 +1100,49 @@ def production_pipeline(detector_size: str = "medium", threshold: float = 0.5, d
                         with_pose: bool = True, pose_device: Optional[str] = None,
                         siglip_revision: Optional[str] = SigLIPEmbedder.DEFAULT_REVISION,
                         projector: Optional[PitchProjector] = None, frame_rate: float = 25.0,
-                        calibrator: Optional["FrameCalibrator"] = None, with_calibration: bool = True) -> VisionPipeline:
+                        calibrator: Optional["FrameCalibrator"] = None, with_calibration: bool = True,
+                        detector_weights: Optional[str] = None, detector_classes: Optional[Dict[int, str]] = None,
+                        ball_threshold: Optional[float] = None, motion_compensation: bool = False,
+                        stitch: bool = False, segmenter_weights: Optional[str] = None,
+                        jersey_weights: Optional[str] = None) -> VisionPipeline:
     """RF-DETR + ByteTrack + SigLIP/k-means (+ RTMPose) with per-frame line calibration.
     Needs requirements-vision.txt and the weights.
 
     Calibration: an explicit ``calibrator`` is used as given; otherwise a default ``FrameCalibrator`` is
     built unless ``with_calibration`` is False or a static ``projector`` is passed (a known homography
-    replaces the calibrator, it is not combined with it)."""
+    replaces the calibrator, it is not combined with it); ``segmenter_weights`` gives it the line
+    segmenter (``line_seg.py``). ``detector_weights`` / ``detector_classes``: RF-DETR fine-tuned on the
+    GSR roles (``colab/train_detector.py``). ``motion_compensation`` tracks in each shot's reference
+    frame, ``stitch`` (which needs it) re-links fragments, ``jersey_weights`` reads the numbers."""
     import torch
 
+    dev = device or ("cuda" if torch.cuda.is_available() else "cpu")
     if calibrator is None and with_calibration and projector is None:
         from .calibration import FrameCalibrator
 
-        calibrator = FrameCalibrator()
+        segmenter = None
+        if segmenter_weights:
+            from .line_seg import LineSegmenter
 
-    dev = device or ("cuda" if torch.cuda.is_available() else "cpu")
+            segmenter = LineSegmenter(segmenter_weights, device=dev)
+        calibrator = FrameCalibrator(segmenter=segmenter)
     pose = RTMPoseEstimator(device=(pose_device or ("cuda" if dev.startswith("cuda") else "cpu"))) if with_pose else None
-    return VisionPipeline(detector=RFDETRDetector(size=detector_size, threshold=threshold, device=dev),
-                          tracker=ByteTrackTracker(frame_rate=frame_rate),
-                          embedder=SigLIPEmbedder(revision=siglip_revision, device=dev),
-                          pose=pose, projector=projector, frame_rate=frame_rate, calibrator=calibrator)
+    tracker: Tracker = ByteTrackTracker(frame_rate=frame_rate)
+    if motion_compensation or stitch:
+        tracker = MotionCompensatedTracker(tracker)
+    stitch_cfg = None
+    if stitch:
+        from .stitching import StitchConfig
+
+        stitch_cfg = StitchConfig()
+    reader = None
+    if jersey_weights:
+        from .jersey import JerseyReader
+
+        reader = JerseyReader(jersey_weights, device=dev)
+    return VisionPipeline(detector=RFDETRDetector(size=detector_size, threshold=threshold, device=dev,
+                                                  weights=detector_weights, classes=detector_classes,
+                                                  ball_threshold=ball_threshold),
+                          tracker=tracker, embedder=SigLIPEmbedder(revision=siglip_revision, device=dev),
+                          pose=pose, projector=projector, frame_rate=frame_rate, calibrator=calibrator,
+                          stitch=stitch_cfg, jersey_reader=reader)

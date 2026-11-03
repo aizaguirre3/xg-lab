@@ -202,3 +202,13 @@ def test_the_runner_enforces_its_own_wall_clock_limit(monkeypatch):
     res = rc.subprocess_runner(hang, stdin_text="ignored")
     assert res.returncode == 124 and "timed out" in res.stderr and res.stdout.strip() == "partial"
     assert time.monotonic() - t0 < 10
+
+
+def test_pipeline_keywords_point_at_the_uploaded_weights():
+    rc = load_module("run_clips")
+    kw = rc.pipeline_keywords('{"detector_weights": "@det.pth", "detector_classes": {"1": "player", "4": "ball"}, '
+                              '"stitch": true}', ["det.pth=data/models/detector/best.pth"])
+    assert kw == {"detector_weights": "/content/weights/det.pth", "detector_classes": {1: "player", 4: "ball"},
+                  "stitch": True}
+    with pytest.raises(SystemExit):
+        rc.pipeline_keywords('{"jersey_weights": "@missing.pt"}', [])

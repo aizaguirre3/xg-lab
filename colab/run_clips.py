@@ -49,6 +49,7 @@ DEFAULT_COLAB = os.environ.get("COLAB_CLI", os.path.expanduser("~/.local/bin/col
 DEFAULT_REPO = "https://github.com/aizaguirre3/xg-lab.git"
 REMOTE_OUT = "/content/varlab_out"
 REMOTE_TOKEN = "/content/.hf_token"
+REMOTE_WEIGHTS = "/content/weights"
 WORKER = HERE / "vision_worker.py"
 REQUIREMENTS = HERE.parent / "requirements-vision.txt"
 
@@ -202,9 +203,31 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                    help="zip: one <split>.zip per split, clips range-read out of it (SN-GSR-2025); folders: per-clip download")
     p.add_argument("--clip-pattern", default="{split}/{clip}/*", help="allow_patterns template (folders layout only)")
     p.add_argument("--resume", action="store_true", help="skip clips whose Labels-GameState.json is already local")
+    p.add_argument("--weights", nargs="*", default=[], metavar="NAME=PATH",
+                   help="local weight files to upload to /content/weights/<NAME> before setup (gitignored models)")
+    p.add_argument("--cache", action="store_true", help="also write and download each clip's cache.pkl "
+                   "(detections, tracks, embeddings, calibration) for offline tuning")
+    p.add_argument("--pipeline-kw", default="{}",
+                   help="JSON of production_pipeline keywords; '@NAME' in a value is the uploaded weights' path")
     p.add_argument("--colab", default=DEFAULT_COLAB)
     p.add_argument("--dry-run", action="store_true", help="print the commands instead of running them")
     return p.parse_args(argv)
+
+
+def pipeline_keywords(raw_json: str, weights: Sequence[str]) -> dict:
+    """``--pipeline-kw`` parsed, with every ``"@NAME"`` value replaced by the remote path of the
+    ``--weights NAME=...`` upload. JSON object keys are strings, so ``detector_classes`` keys
+    (class ids) are turned back into ints."""
+    kw = json.loads(raw_json)
+    names = {spec.split("=", 1)[0] for spec in weights}
+    for k, v in list(kw.items()):
+        if isinstance(v, str) and v.startswith("@"):
+            if v[1:] not in names:
+                raise SystemExit(f"--pipeline-kw {k}={v}: no --weights {v[1:]}=...")
+            kw[k] = f"{REMOTE_WEIGHTS}/{v[1:]}"
+    if isinstance(kw.get("detector_classes"), dict):
+        kw["detector_classes"] = {int(c): n for c, n in kw["detector_classes"].items()}
+    return kw
 
 
 def list_dataset_clips(hf_dataset: str, split: str, revision: str = "main") -> List[str]:
@@ -271,10 +294,17 @@ def run(args: argparse.Namespace, runner: Optional[Runner] = None) -> int:
         session.install(REQUIREMENTS)
         session.restart_kernel()
         session.exec_file(WORKER, timeout=args.setup_timeout)
+        pipeline_kw = pipeline_keywords(args.pipeline_kw, args.weights)
+        if args.weights:
+            session.exec_code(f"import os; os.makedirs({REMOTE_WEIGHTS!r}, exist_ok=True)", timeout=60)
+        for spec in args.weights:
+            name, local = spec.split("=", 1)
+            session.upload(Path(local), f"{REMOTE_WEIGHTS}/{name}")
         setup_call = (f"setup(ref={args.ref!r}, repo={args.repo!r}, detector_size={args.detector_size!r}, "
                       f"with_pose={not args.no_pose!r}, with_calibration={not args.no_calibration!r}, "
                       f"hf_dataset={args.hf_dataset!r}, hf_revision={args.hf_revision!r}, "
-                      f"clip_pattern={args.clip_pattern!r}, hf_layout={args.hf_layout!r})")
+                      f"clip_pattern={args.clip_pattern!r}, hf_layout={args.hf_layout!r}, pipeline_kw={pipeline_kw!r}, "
+                      f"cache={bool(args.cache)!r})")
         session.exec_code(setup_call, timeout=args.setup_timeout)
         for clip in todo:
             elapsed = time.monotonic() - t_start
@@ -288,6 +318,8 @@ def run(args: argparse.Namespace, runner: Optional[Runner] = None) -> int:
                 session.exec_code(f"process_clip({clip!r}, split={args.split!r})", timeout=args.clip_timeout)
                 session.download(f"{REMOTE_OUT}/{args.split}/{clip}/Labels-GameState.json", out / clip / "Labels-GameState.json")
                 session.download(f"{REMOTE_OUT}/{args.split}/{clip}/report.json", out / clip / "report.json")
+                if args.cache:
+                    session.download(f"{REMOTE_OUT}/{args.split}/{clip}/cache.pkl", out / clip / "cache.pkl")
                 if not dry and not (out / clip / "Labels-GameState.json").is_file():
                     raise RuntimeError(f"download of {clip} produced no file")
             except Exception as e:  # noqa: BLE001

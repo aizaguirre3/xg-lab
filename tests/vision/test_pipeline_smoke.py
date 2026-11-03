@@ -120,3 +120,53 @@ def test_production_backends_need_their_packages():
     except ImportError:
         with pytest.raises(ImportError):
             pl.RFDETRDetector(size="nano")
+
+
+@pytest.mark.parametrize("tracker_name", ["greedy", "bytetrack"])
+def test_motion_compensated_tracking_and_stitching_end_to_end(synthetic, tmp_path: Path, tracker_name: str):
+    from varlab_vision.stitching import StitchConfig
+
+    clip, gt = synthetic
+    if tracker_name == "bytetrack":
+        pytest.importorskip("trackers")
+        inner = pl.ByteTrackTracker(frame_rate=25)
+    else:
+        inner = pl.GreedyIoUTracker()
+    pipe = pl.smoke_pipeline(projector=pl.HomographyProjector(clip.homography), tracker=pl.MotionCompensatedTracker(inner))
+    pipe.stitch = StitchConfig()
+    report = pipe.run_clip(clip.clip_dir, tmp_path / "pred.json")
+    assert report.backends["tracker"].endswith("+cmc")
+    assert any(n.startswith("stitching:") for n in report.notes)
+    pred = objects_frame(read_gsr_clip(tmp_path / "pred.json"))
+    people = pred[pred["role"] != "ball"]
+    assert people["track_id"].nunique() == 7  # six players and the referee, one id each over the 30 frames
+    assert set(people["team"].dropna()) == {"left", "right"}
+
+
+def test_assign_teams_clusters_outfield_players_and_names_sides_on_the_pitch():
+    tids = np.array([1, 1, 2, 2, 3, 3, 4, 5, 6])
+    cluster = np.array([0, 0, 1, 1, 0, 1, -1, -1, 0])  # track 3 split 1-1: argmax takes cluster 0
+    roles = {1: "player", 2: "player", 3: "player", 4: "goalkeeper", 5: "referee", 6: "player"}
+    pitch_x = {1: 20.0, 2: -15.0, 3: 5.0, 4: -48.0, 5: 0.0, 6: 30.0}
+    image_x = np.zeros(len(tids))  # no help from the image
+    out = pl.assign_teams(tids, cluster, image_x, roles=roles, pitch_x=pitch_x)
+    # cluster 0 (tracks 1, 3, 6: median x 20) plays right of cluster 1 (track 2: x -15)
+    assert out == {1: "right", 2: "left", 3: "right", 6: "right", 4: "left"}
+    assert 5 not in out  # the referee has no team
+
+
+def test_assign_teams_without_roles_or_pitch_matches_the_old_rule():
+    tids = np.array([1, 1, 2, 2])
+    cluster = np.array([0, 0, 1, 1])
+    cx = np.array([800.0, 820.0, 100.0, 120.0])
+    assert pl.assign_teams(tids, cluster, cx) == pl.assign_teams_by_track(tids, cluster, cx) == {1: "right", 2: "left"}
+
+
+def test_track_roles_take_the_majority():
+    def fd(ids, roles):
+        n = len(ids)
+        return (1, 10, 10, pl.FrameDetections(xyxy=np.zeros((n, 4)), confidence=np.ones(n),
+                                              class_name=np.array(["person"] * n, dtype=object),
+                                              tracker_id=np.array(ids), role=np.array(roles, dtype=object)))
+    frames = [fd([1, 2], ["player", "referee"]), fd([1, 2], ["goalkeeper", "referee"]), fd([1], ["player"])]
+    assert pl.track_roles(frames) == {1: "player", 2: "referee"}

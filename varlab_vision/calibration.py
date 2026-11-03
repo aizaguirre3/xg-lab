@@ -2328,6 +2328,8 @@ def marking_alignment(frame_bgr: np.ndarray, h_m2px: np.ndarray, samples: np.nda
     return float(np.median(np.abs(off))), float(usable.mean()), n_vis
 
 
+_MEASURE = object()  # FrameCalibrator.push: no motion given, measure it
+
 # what a rewind restores (see FrameCalibrator._close_with)
 _TRACK_STATE = ("_prior", "_p", "_v", "_n_inliers", "_missed", "_fit_no", "_steady", "last_shift_px")
 
@@ -2645,9 +2647,12 @@ class FrameCalibrator:
         finally:
             self._frame_no = frame_no
 
-    def push(self, frame_bgr: np.ndarray, person_boxes: Optional[np.ndarray] = None) -> List[CalibrationResult]:
+    def push(self, frame_bgr: np.ndarray, person_boxes: Optional[np.ndarray] = None,
+             motion=_MEASURE) -> List[CalibrationResult]:
         """Feed the next frame (and the people detected in it, (N, 4) pixels, left out of the marking
-        mask); returns the results that are final now, in frame order."""
+        mask); returns the results that are final now, in frame order. ``motion`` is the camera's
+        motion into this frame when the caller has measured it already (the pipeline does, for its
+        tracker); by default the calibrator measures it itself."""
         h, w = frame_bgr.shape[:2]
         out: List[CalibrationResult] = []
         if self._size is not None and self._size != (w, h):  # a different video: nothing carries over
@@ -2659,7 +2664,9 @@ class FrameCalibrator:
         self._boxes = {n: b for n, b in self._boxes.items() if n > self._frame_no - 2 * self.frame_stride - 2}
         if person_boxes is not None:
             self._boxes[self._frame_no] = np.asarray(person_boxes, float).reshape(-1, 4)
-        if self._registrar is not None:
+        if motion is not _MEASURE:
+            self._motions[self._frame_no] = motion
+        elif self._registrar is not None:
             self._motions[self._frame_no] = self._registrar.push(frame_bgr, self._boxes.get(self._frame_no))
         done: List[CalibrationResult] = []
         if cut:
@@ -2692,13 +2699,14 @@ class FrameCalibrator:
             return list(results)
         return bridge_gaps(results, self._size[0], self._size[1], self.model, **kw)
 
-    def update(self, frame_bgr: np.ndarray, person_boxes: Optional[np.ndarray] = None) -> CalibrationResult:
+    def update(self, frame_bgr: np.ndarray, person_boxes: Optional[np.ndarray] = None,
+               motion=_MEASURE) -> CalibrationResult:
         """One frame in, its result out: fits every frame (the frame stride is ``push``'s)."""
         if self._pending:
             raise RuntimeError("frames pushed earlier are still held back: call flush() before update()")
         stride, self.frame_stride = self.frame_stride, 1
         try:
-            return self.push(frame_bgr, person_boxes)[-1]
+            return self.push(frame_bgr, person_boxes, motion)[-1]
         finally:
             self.frame_stride = stride
 
