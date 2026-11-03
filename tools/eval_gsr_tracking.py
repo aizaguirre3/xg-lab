@@ -58,6 +58,14 @@ def iou_matrix(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     return np.where(union > 0, inter / union, 0.0)
 
 
+def _jersey(v):
+    """A jersey label as a canonical number string, or None."""
+    if v is None or (isinstance(v, float) and np.isnan(v)):
+        return None
+    s = str(v).strip()
+    return str(int(s)) if s.isdigit() else None
+
+
 def score_clip(gt: pd.DataFrame, pr: pd.DataFrame, iou_thr: float = 0.5, ball_px: float = 15.0) -> dict:
     g_all, p_all = gt[gt["role"].isin(PERSON_ROLES)], pr[pr["role"] != "ball"]
     gb, pb = gt[gt["role"] == "ball"], pr[pr["role"] == "ball"]
@@ -68,6 +76,7 @@ def score_clip(gt: pd.DataFrame, pr: pd.DataFrame, iou_thr: float = 0.5, ball_px
     last_match: dict = {}
     co = {}  # (gt_track, pred_track) -> frames overlapping with IoU >= thr
     team_pairs = []
+    role_pairs = role_agree = jersey_n = jersey_answered = jersey_correct = 0
     ball_found = ball_n = ball_pred_ok = ball_pred_n = 0
     g_by = {f: d for f, d in g_all.groupby("frame")}
     p_by = {f: d for f, d in p_all.groupby("frame")}
@@ -99,6 +108,15 @@ def score_clip(gt: pd.DataFrame, pr: pd.DataFrame, iou_thr: float = 0.5, ball_px
             gt_team, pr_team = g["team"].iloc[a], p["team"].iloc[b]
             if roles[a] in ("player", "goalkeeper") and gt_team in ("left", "right") and pr_team in ("left", "right"):
                 team_pairs.append((gt_team, pr_team))
+            role_pairs += 1
+            role_agree += int(p["role"].iloc[b] == roles[a])
+            gj = _jersey(g["jersey"].iloc[a]) if "jersey" in g.columns else None
+            pj = _jersey(p["jersey"].iloc[b]) if "jersey" in p.columns else None
+            if gj is not None:
+                jersey_n += 1
+                if pj is not None:
+                    jersey_answered += 1
+                    jersey_correct += int(pj == gj)
         # ball
         gbf, pbf = gb_by.get(f), pb_by.get(f)
         if gbf is not None and len(gbf):
@@ -130,7 +148,9 @@ def score_clip(gt: pd.DataFrame, pr: pd.DataFrame, iou_thr: float = 0.5, ball_px
             "gt_tracks": len(g_tracks), "pred_tracks": len(p_tracks),
             "role_tp": role_tp, "role_n": role_n, "team_pairs": len(team_pairs),
             "team_agree": (None if team_acc is None else round(team_acc * len(team_pairs))),
-            "ball_n": ball_n, "ball_found": ball_found, "ball_pred_n": ball_pred_n, "ball_pred_ok": ball_pred_ok}
+            "ball_n": ball_n, "ball_found": ball_found, "ball_pred_n": ball_pred_n, "ball_pred_ok": ball_pred_ok,
+            "role_pairs": role_pairs, "role_agree": role_agree,
+            "jersey_n": jersey_n, "jersey_answered": jersey_answered, "jersey_correct": jersey_correct}
 
 
 def rates(s: dict) -> dict:
@@ -144,7 +164,10 @@ def rates(s: dict) -> dict:
                               for r in PERSON_ROLES},
            "team_accuracy": (round(s["team_agree"] / s["team_pairs"], 4) if s["team_pairs"] else None),
            "ball_recall": (round(s["ball_found"] / s["ball_n"], 4) if s["ball_n"] else None),
-           "ball_precision": (round(s["ball_pred_ok"] / s["ball_pred_n"], 4) if s["ball_pred_n"] else None)}
+           "ball_precision": (round(s["ball_pred_ok"] / s["ball_pred_n"], 4) if s["ball_pred_n"] else None),
+           "role_accuracy": (round(s["role_agree"] / s["role_pairs"], 4) if s.get("role_pairs") else None),
+           "jersey_coverage": (round(s["jersey_answered"] / s["jersey_n"], 4) if s.get("jersey_n") else None),
+           "jersey_precision": (round(s["jersey_correct"] / s["jersey_answered"], 4) if s.get("jersey_answered") else None)}
     if "det_tp" in s:
         out["detector_precision"] = round(s["det_tp"] / max(1, s["det_tp"] + s["det_fp"]), 4)
         out["detector_recall"] = round(s["det_tp"] / max(1, s["det_tp"] + s["det_fn"]), 4)
