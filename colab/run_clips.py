@@ -170,6 +170,35 @@ class ColabSession:
     def upload(self, local: Path, remote: str) -> None:
         self._run("upload", "-s", self.name, str(local), remote)
 
+    def upload_large(self, local: Path, remote: str, chunk_mb: float = 24.0) -> None:
+        """``upload`` in parts joined on the VM and checked against the local SHA-256: the CLI's single
+        upload of a 134 MB checkpoint failed with HTTP 500 (2026-11-03)."""
+        import hashlib
+
+        local = Path(local)
+        size, chunk = local.stat().st_size, int(chunk_mb * 2 ** 20)
+        if size <= chunk:
+            self.upload(local, remote)
+            return
+        digest = hashlib.sha256(local.read_bytes()).hexdigest()
+        parts = []
+        with tempfile.TemporaryDirectory() as tmp, open(local, "rb") as fh:
+            k = 0
+            while True:
+                data = fh.read(chunk)
+                if not data:
+                    break
+                part = Path(tmp) / f"part{k:03d}"
+                part.write_bytes(data)
+                self.upload(part, f"{remote}.part{k:03d}")
+                parts.append(f"{remote}.part{k:03d}")
+                k += 1
+        join = (f"import hashlib, os\nparts = {parts!r}\nwith open({remote!r}, 'wb') as out:\n"
+                f"    for p in parts:\n        out.write(open(p, 'rb').read())\n        os.remove(p)\n"
+                f"got = hashlib.sha256(open({remote!r}, 'rb').read()).hexdigest()\n"
+                f"assert got == {digest!r}, f'checksum mismatch: {{got}}'\nprint('joined', {remote!r}, os.path.getsize({remote!r}))")
+        self.exec_checked(join, timeout=600)
+
     def download(self, remote: str, local: Path, attempts: int = 4, wait_s: float = 5.0) -> None:
         """``colab download`` with retries: a transient CLI failure (rc=1, empty stderr, seen on
         2026-10-26 after the clip had been processed fine) must not end the whole session."""
@@ -307,7 +336,7 @@ def run(args: argparse.Namespace, runner: Optional[Runner] = None) -> int:
             session.exec_code(f"import os; os.makedirs({REMOTE_WEIGHTS!r}, exist_ok=True)", timeout=60)
         for spec in args.weights:
             name, local = spec.split("=", 1)
-            session.upload(Path(local), f"{REMOTE_WEIGHTS}/{name}")
+            session.upload_large(Path(local), f"{REMOTE_WEIGHTS}/{name}")
         setup_call = (f"setup(ref={args.ref!r}, repo={args.repo!r}, detector_size={args.detector_size!r}, "
                       f"with_pose={not args.no_pose!r}, with_calibration={not args.no_calibration!r}, "
                       f"hf_dataset={args.hf_dataset!r}, hf_revision={args.hf_revision!r}, "

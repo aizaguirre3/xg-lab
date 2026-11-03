@@ -52,7 +52,7 @@ def run(args: argparse.Namespace) -> int:
         session.exec_checked(f"prepare_jersey(every={args.every}, holdout={list(args.holdout)!r})", timeout=1800)
         for name in ("ckpt.pt", "best.pt", "log.jsonl"):
             if (out / name).is_file():
-                session.upload(out / name, f"{REMOTE}/{name}")
+                session.upload_large(out / name, f"{REMOTE}/{name}")
         while True:
             if args.budget_min - (time.monotonic() - t0) / 60.0 < args.chunk_min + 3:
                 print(f"[train_jersey] budget reached ({args.budget_min} min); resume with a new run")

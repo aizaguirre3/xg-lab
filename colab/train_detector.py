@@ -69,7 +69,7 @@ def run(args: argparse.Namespace) -> int:
         session.exec_checked(f"prepare(every={args.every}, holdout={list(args.holdout)!r})", timeout=1800)
         if (out / "last.ckpt").is_file():
             session.exec_code(f"import os; os.makedirs({REMOTE!r}, exist_ok=True)", timeout=60)
-            session.upload(out / "last.ckpt", f"{REMOTE}/last.ckpt")
+            session.upload_large(out / "last.ckpt", f"{REMOTE}/last.ckpt")
         try:
             session.exec_checked(f"train(epochs={args.epochs}, batch_size={args.batch_size}, "
                                  f"grad_accum_steps={args.grad_accum}, lr={args.lr}, resolution={args.resolution})",

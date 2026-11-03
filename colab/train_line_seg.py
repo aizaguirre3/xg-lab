@@ -53,7 +53,7 @@ def run(args: argparse.Namespace) -> int:
         session.exec_checked(f"prepare(every={args.every}, holdout={list(args.holdout)!r})", timeout=1800)
         for name in ("ckpt.pt", "best.pt", "log.jsonl"):  # a resumed run carries on from the last chunk
             if (out / name).is_file():
-                session.upload(out / name, f"{REMOTE}/{name}")
+                session.upload_large(out / name, f"{REMOTE}/{name}")
         while True:
             left = args.budget_min - (time.monotonic() - t0) / 60.0
             if left < args.chunk_min + 3:
