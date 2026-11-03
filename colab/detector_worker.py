@@ -136,7 +136,7 @@ def prepare(every: int = 5, holdout=(), split: str = "train", dataset: str = "So
 
 def train(epochs: int = 12, batch_size: int = 4, grad_accum_steps: int = 4, lr: float = 1e-4,
           resolution: int = 0, **extra) -> str:
-    """Fine-tune RF-DETR Medium on ``WORK/data``; resumes from ``WORK/out/checkpoint.pth`` when it exists.
+    """Fine-tune RF-DETR Medium on ``WORK/data``; resumes from ``WORK/out/last.ckpt`` when it exists.
     ``resolution`` 0 keeps the model's default. Returns the output folder."""
     import rfdetr
 
@@ -144,7 +144,7 @@ def train(epochs: int = 12, batch_size: int = 4, grad_accum_steps: int = 4, lr: 
     out.mkdir(parents=True, exist_ok=True)
     kw = dict(dataset_dir=str(WORK / "data"), epochs=epochs, batch_size=batch_size,
               grad_accum_steps=grad_accum_steps, lr=lr, output_dir=str(out), **extra)
-    ckpt = out / "checkpoint.pth"
+    ckpt = out / "last.ckpt"  # rfdetr 1.11 trains with Lightning
     if ckpt.exists():
         kw["resume"] = str(ckpt)
     model = rfdetr.RFDETRMedium(**({"resolution": resolution} if resolution else {}))

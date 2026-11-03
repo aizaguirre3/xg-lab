@@ -27,7 +27,7 @@ from run_clips import ColabSession, printing_runner, subprocess_runner  # noqa: 
 WORKER = HERE / "detector_worker.py"
 REMOTE = "/content/det/out"
 RFDETR_PIN = "rfdetr[train,loggers]==1.11.2"  # as in requirements-vision.txt, plus the training extras (Lightning)
-OUTPUTS = ("checkpoint.pth", "checkpoint_best_total.pth", "log.txt")
+OUTPUTS = ("last.ckpt", "checkpoint_best_total.pth", "metrics.csv")  # rfdetr 1.11 (Lightning) names
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
@@ -67,9 +67,9 @@ def run(args: argparse.Namespace) -> int:
         if args.setup_only:
             return 0
         session.exec_checked(f"prepare(every={args.every}, holdout={list(args.holdout)!r})", timeout=1800)
-        if (out / "checkpoint.pth").is_file():
+        if (out / "last.ckpt").is_file():
             session.exec_code(f"import os; os.makedirs({REMOTE!r}, exist_ok=True)", timeout=60)
-            session.upload(out / "checkpoint.pth", f"{REMOTE}/checkpoint.pth")
+            session.upload(out / "last.ckpt", f"{REMOTE}/last.ckpt")
         try:
             session.exec_checked(f"train(epochs={args.epochs}, batch_size={args.batch_size}, "
                                  f"grad_accum_steps={args.grad_accum}, lr={args.lr}, resolution={args.resolution})",
