@@ -30,6 +30,9 @@ PnLCalib (GPL-2) or TrackLab / sn-gamestate (GPL-3). The chain is
    minimising the pixel distances of the inlier segments' endpoints (and the matched
    ellipses' points) to the projected model markings, then again as a pinhole camera
    (focal length, rotation, position).
+   Before the blind search, a label map from the line segmenter (``line_seg.py``), when
+   given, names the extracted lines and the homography solved from them is tried first
+   (``named_line_homographies``, verified with ``NAMED_VERIFY``).
 6. ``verify_solution``: the evidence for a solution in the frame itself (marking support,
    unexplained lines, leave-one-out agreement, the camera it implies, the fit's standard
    error where the people are); ``VerifyConfig`` decides when it is refused.

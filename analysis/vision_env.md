@@ -544,6 +544,54 @@ are 83 to 100% within 1 m. Tracked calibration, which the pipeline runs, already
 claims more than the from-scratch sample above (51% against 40%); bridging adds
 20.6 points on top. Registration adds about 9 ms per frame.
 
+## Named pitch lines (2026-11-03)
+
+Where the calibration fails on real frames it is mostly not short of segments: on
+the 2026-11-02 run the failing frames had a median of 18 extracted lines, more
+than the frames that worked. What it lacks is which marking each segment is. The
+GSR labels name every visible marking on every frame (26 SoccerNet names), so a
+network can learn to label each pixel with its marking.
+
+**The network.** A U-Net on a torchvision ResNet-18 at 640x352 (`line_seg.py`),
+trained on Colab (`colab/train_line_seg.py`) on every 5th frame of 52 train clips
+(7,650 frames), with a mirrored-pitch flip that swaps left and right names. The
+five calibration tuning clips (SNGS-060, -064, -072, -099, -103) are held out:
+their mean IoU over the classes in view reached 0.72 after 1,800 steps (9 rounds of
+200; about 6 minutes on the L4). The SoccerNet-to-PitchModel name mapping was
+checked against cameras fitted to the labelled feet. Its weights stay out of the
+repository (the dataset card says GPL-3.0).
+
+**How it is used.** It only names the lines the classical extractor found (the
+geometry stays sub-pixel): each line is read along its length in the label map,
+named when 60% of its votes agree, and two non-collinear lines with one name lose
+it. A homography is solved from the named lines (a DLT on the line
+correspondences, then the least-squares fit of their endpoints; leave-one-out
+variants when a family has a third line) and tried, with its own verification,
+before the blind search. The network runs only when tracking a frame fails.
+
+**Its verification.** With the default checks most named solutions that failed
+were right: on held-out frames their median foot errors were 0.16 to 1.24 m, 8 of
+10 under 1 m, refused for unexplained line length, an unstable leave-one-out on
+few lines, or the standard error at the people. On 375 held-out frames, letting
+up to half of the line length go unexplained for named solutions claims 204
+frames at 99.0% precision, against 174 at 98.9% for the search alone; loosening
+the standard error too would claim 250 but at 97.2%, so it is not done.
+
+**Validation (58 clips, every 50th frame, from scratch, as on 2026-11-02).**
+
+| | Search only (2026-11-02) | With named lines |
+|---|---|---|
+| Frames claimed | 40.3% | 46.9% |
+| Precision of the claim | 96.9% | 96.3% |
+| Claimed frames over 5 m | 0 | 0 |
+| Labelled people within 1 m | 37.9% | 43.6% |
+
+258 of the 408 claimed frames came from named lines. In 60 of the 94 held-out
+frames that still fail with "too few lines", the network itself sees two lines of
+each family and a circle; the extractor misses them (faint or broken strokes).
+Seeding the extractor's robust refit from the network's lines is the next step,
+and the network was trained for 9 of its planned 30 rounds.
+
 ## Two things the first runs taught
 
 1. The Colab kernel already has numpy imported. Pinning `numpy==2.5.4` upgraded
