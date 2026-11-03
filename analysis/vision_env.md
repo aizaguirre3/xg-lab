@@ -607,11 +607,15 @@ tracking fails, 234 of them solved from named lines):
 
 ## Detector, tracking, teams and jersey numbers (2026-11-03)
 
-Four changes to the people side of the pipeline, each measured on the five
+Four changes to the people side of the pipeline, each tuned on the five
 held-out train clips (SNGS-060, -064, -072, -099, -103: 3,750 frames, 118
 labelled people), with clip runs on the Colab L4 cached so that re-linking and
 the team rule could be replayed and scored on the Mac (`run_clips.py --cache`,
-`tools/replay_tracking.py`).
+`tools/replay_tracking.py`), then measured once on the 58 validation clips (the
+table at the end). Those five clips come from games 4 and 6, which five other
+train clips also cover, so the held-out numbers of the trained models (detector,
+jersey reader) flatter them: same players, kits and stadium. The validation games
+(2, 3 and 5) are in no train clip.
 
 **Detector fine-tuned on the GSR roles.** RF-DETR Medium from its COCO weights,
 3 epochs on every 10th frame of 52 train clips (3,900 images, 66,510 boxes;
@@ -669,7 +673,45 @@ train clips in 7 minutes. On the held-out labelled tracks it reads a number for 
 of the 85 numbered players and 95% of those are right. On the pipeline's own
 tracks (held-out clips, an earlier re-linking setting) 71% of the matched boxes of
 numbered players carry a number and 75% of those are right: a wrong join carries
-one player's number onto another's boxes.
+one player's number onto another's boxes. **On the validation games it does not
+work**: 31% of the matched boxes of numbered players get a number and 12% of those
+are right (6 to 42% by game; it says "10" for players wearing 19, 8, 14 and 17). It
+learned the players of the training games, not digits, so the pipeline leaves it
+off (`jersey_weights=None`) and the GSR output keeps null numbers. A reader that
+generalises needs a game-level split and digit-level training (or a text
+recogniser fine-tuned on jersey crops).
+
+**Validation: 58 clips, the whole pipeline** (fine-tuned detector, compensated
+ByteTrack, re-linking, whitened teams; no pose, no calibration, as on 2026-10-26;
+54 s per clip on the L4):
+
+| | 2026-10-26 (stock) | 2026-11-03 |
+|---|---|---|
+| Box precision / recall | 0.946 / 0.814 | 0.973 / 0.894 |
+| Recall: players / goalkeepers / referees | 0.838 / 0.691 / 0.627 | 0.909 / 0.869 / 0.758 |
+| MOTA | 0.763 | 0.863 |
+| IDF1 | 0.628 | 0.756 |
+| Tracks (1,350 labelled people) | 2,957 | 1,867 |
+| ID switches | 2,867 | 4,265 |
+| Team accuracy | 0.735 | 0.842 |
+| Role accuracy (matched boxes) | (every person a player) | 0.823 |
+| Ball recall / precision | 0.346 / 0.886 | 0.479 / 0.827 |
+
+By game:
+
+| Validation game | Clips | Role accuracy | Team accuracy | IDF1 |
+|---|---|---|---|---|
+| 2 | 18 | 0.987 | 0.892 | 0.741 |
+| 3 | 21 | 0.543 | 0.690 | 0.747 |
+| 5 | 19 | 0.991 | 0.899 | 0.780 |
+
+Game 3 is the role classifier failing on an unseen kit: one team is taken for
+referees (352 of the matched player boxes in a sample of its clips), so those
+players are also left out of the team clustering. A domain rule (at most three
+officials in view) would catch it, but it was found on the validation set and is
+not tuned here. ID switches rise because 10% more boxes are tracked and a
+re-linked track that is wrong switches at every join; IDF1, which scores identity
+over whole tracks, is the number to read.
 
 ## Two things the first runs taught
 

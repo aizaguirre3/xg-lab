@@ -9,6 +9,10 @@ one with the highest summed log-probability over its crops, kept only when it wi
 The network (a torchvision ResNet-18, BSD-3, ImageNet weights) predicts the number of digits (0, 1
 or 2) and each digit separately, so a number never seen in training can still be read from its
 digits. It sees the torso: the upper middle of the box, where the number is printed.
+
+Status (2026-11-03): trained on the GSR train clips it reads the players of those games (95% right
+on held-out clips of the same games) but not new ones (12% right on the validation games): it
+learned the players, not the digits. The pipeline does not use it by default.
 """
 from __future__ import annotations
 
