@@ -592,6 +592,72 @@ each family and a circle; the extractor misses them (faint or broken strokes).
 Seeding the extractor's robust refit from the network's lines is the next step,
 and the network was trained for 9 of its planned 30 rounds.
 
+## Detector, tracking, teams and jersey numbers (2026-11-03)
+
+Four changes to the people side of the pipeline, each measured on the five
+held-out train clips (SNGS-060, -064, -072, -099, -103: 3,750 frames, 118
+labelled people), with clip runs on the Colab L4 cached so that re-linking and
+the team rule could be replayed and scored on the Mac (`run_clips.py --cache`,
+`tools/replay_tracking.py`).
+
+**Detector fine-tuned on the GSR roles.** RF-DETR Medium from its COCO weights,
+3 epochs on every 10th frame of 52 train clips (3,900 images, 66,510 boxes;
+player, goalkeeper, referee, ball, other), 10 minutes on the L4
+(`colab/train_detector.py`). Both runs below use the same tracking:
+
+| | Stock COCO detector | Fine-tuned |
+|---|---|---|
+| Box precision / recall | 0.972 / 0.785 | 0.982 / 0.944 |
+| Recall: players / goalkeepers / referees | 0.807 / 0.584 / 0.628 | 0.945 / 0.978 / 0.929 |
+| MOTA | 0.756 | 0.920 |
+| IDF1 | 0.596 | 0.689 |
+| Ball recall / precision | 0.430 / 0.916 | 0.623 / 0.890 |
+
+Each box now carries its role (the GSR output used to write every person as a
+player); the role of matched boxes is right 99.8% of the time.
+
+**Motion-compensated tracking.** Tracking in the coordinates of the shot's
+reference frame did not help ByteTrack on its own (stock detector: IDF1 0.596
+against 0.599, 369 ID switches against 336); at 25 fps its motion model follows a
+pan. Its reference maps are what re-linking needs, and under re-linking the
+compensated fragments gave the better teams, so it is on when re-linking.
+
+**Re-linking fragments.** A fragment that ends is joined to one that starts
+later when the gap is at most 300 frames, the second starts within reach of where
+the first player was going (in body heights), the two look alike (SigLIP cosine
+distance at most 0.25), and role and team agree; one assignment over the clip.
+IDF1 rose with the allowed gap up to 300 frames and stayed flat beyond:
+
+| Fine-tuned detector, compensated tracking | IDF1 | ID switches | Tracks (118 people) |
+|---|---|---|---|
+| Fragments as tracked | 0.689 | 481 | 252 |
+| Re-linked | 0.781 | 438 | 154 |
+
+**Teams.** k-means on the raw SigLIP crop embeddings follows pose, size and
+background more than kit. Whitening the embeddings along their first 4 principal
+directions before the 2-cluster k-means, clustering only outfield players, and
+fixing each fragment's team before re-linking:
+
+| Team rule (after re-linking) | Team accuracy |
+|---|---|
+| k-means on raw embeddings | 0.685 |
+| Whitened (2, 4 or 8 directions alike) | 0.843 |
+| Whitened, fragments re-linked only within a team | 0.865 |
+
+Goalkeepers join the side of the half they stand in when the frames are
+calibrated; referees get no team; sides are named on the pitch (SoccerNet's left
+defends the left goal: its goalkeeper stands at x of -50 to -47 m).
+
+**Jersey numbers.** GSR labels the number per player, on every box of the track,
+seen or not, so a ResNet-18 reader (digit count and each digit) scores every
+torso crop and a track takes the number with the highest summed log-probability
+when it wins by a margin over at least 3 crops. Trained on 136,056 crops of the
+train clips in 7 minutes. On the held-out labelled tracks it reads a number for 93%
+of the 85 numbered players and 95% of those are right. On the pipeline's own
+tracks (held-out clips, an earlier re-linking setting) 71% of the matched boxes of
+numbered players carry a number and 75% of those are right: a wrong join carries
+one player's number onto another's boxes.
+
 ## Two things the first runs taught
 
 1. The Colab kernel already has numpy imported. Pinning `numpy==2.5.4` upgraded
