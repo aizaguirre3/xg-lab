@@ -76,3 +76,26 @@ def test_calibration_summary_reports_the_precision_of_the_claim():
     assert s["claimed_by_median"] == {"under_1m": 2, "1_to_5m": 1, "over_5m": 0}
     assert s["within_1m_of_all_labelled_boxes"] == pytest.approx(5 / 14, abs=1e-4)
     assert ev.summary_of([], 0)["precision_1m"] is None
+
+
+def test_replay_tracking_rebuilds_and_scores_a_cached_clip(tmp_path):
+    pytest.importorskip("cv2")
+    pytest.importorskip("scipy")
+    from varlab_vision import pipeline as pl
+    from varlab_vision.synthetic import render_synthetic_clip
+
+    clip = render_synthetic_clip(tmp_path / "syn", n_frames=20, width=640, height=360, n_per_team=3, seed=2)
+    pipe = pl.smoke_pipeline(projector=pl.HomographyProjector(clip.homography),
+                             tracker=pl.MotionCompensatedTracker(pl.GreedyIoUTracker()))
+    cache_dir = tmp_path / "cache" / clip.clip_dir.name
+    cache_dir.mkdir(parents=True)
+    pipe.run_clip(clip.clip_dir, tmp_path / "pred.json", cache_path=cache_dir / "cache.pkl")
+    replay = _tool("replay_tracking")
+    out = tmp_path / "replay.json"
+    assert replay.main(["--cache", str(tmp_path / "cache"), "--labels", str(clip.clip_dir.parent),
+                        "--stitch", "max_gap=30", "--out", str(out)]) == 0
+    import json
+
+    res = json.loads(out.read_text())["overall"]
+    assert res["tracks"] <= res["fragments"] and res["idf1"] > 0.9 and res["team_accuracy"] == 1.0
+    assert replay.main(["--cache", str(tmp_path / "cache"), "--labels", str(clip.clip_dir.parent)]) == 0  # no stitching
