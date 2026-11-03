@@ -64,3 +64,12 @@ def test_a_new_shot_starts_a_reference_far_from_the_old_one():
     again = t.update(dets[0], frames[0], motion=None, new_shot=True)  # the same boxes, but after a cut
     assert not set(first.tracker_id.tolist()) & set(again.tracker_id.tolist())
     assert np.array_equal(again.xyxy, dets[0].xyxy)  # ids come back on the original boxes
+
+
+def test_without_compensation_the_boxes_go_through_and_the_reference_is_kept():
+    frames, dets, _ = _clip(n=6)
+    t = MotionCompensatedTracker(GreedyIoUTracker(max_lost=0), compensate=False)
+    reg = FrameRegistrar()
+    for img, d in zip(frames, dets):
+        t.update(d, img, motion=reg.push(img, d.xyxy))
+    assert t.name.endswith("+ref") and not np.allclose(t._to_ref, np.eye(3))  # the pan is in the map

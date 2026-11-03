@@ -431,7 +431,11 @@ class MotionCompensatedTracker:
     map from this frame's pixels to the reference frame's, and hands the tracker the
     detections' boxes mapped there; the ids come back on the original boxes. A pan then moves
     nobody, so the tracker's constant-velocity prediction only has the players' own motion to
-    follow. A missing or failed motion leaves the map where it was (a blurred frame). With
+    follow. (Measured on five held-out GSR train clips with the stock detector, this did not help
+    ByteTrack: IDF1 0.596 against 0.599 for plain ByteTrack, 369 ID switches against 336; at 25 fps
+    its own motion model follows a pan. With ``compensate=False`` the boxes go to the tracker as they
+    are and only the reference maps are kept, which is what re-linking needs.) A missing or failed
+    motion leaves the map where it was (a blurred frame). With
     ``new_shot`` (a cut) the new shot gets a reference of its own, placed far from the last one,
     so the tracks of the old shot cannot claim boxes of the new one and simply expire (resetting
     the tracker instead would restart its ids and hand out duplicates).
@@ -439,9 +443,10 @@ class MotionCompensatedTracker:
 
     SHOT_OFFSET_PX = 1.0e5
 
-    def __init__(self, tracker: "Tracker"):
+    def __init__(self, tracker: "Tracker", compensate: bool = True):
         self.tracker = tracker
-        self.name = f"{getattr(tracker, 'name', 'tracker')}+cmc"
+        self.compensate = compensate  # False: track the boxes as they are, only keep the reference maps
+        self.name = f"{getattr(tracker, 'name', 'tracker')}" + ("+cmc" if compensate else "+ref")
         self.reset()
 
     def reset(self) -> None:
@@ -457,6 +462,8 @@ class MotionCompensatedTracker:
         elif motion is not None and getattr(motion, "ok", False):
             m = self._to_ref @ np.linalg.inv(motion.h)
             self._to_ref = m / m[2, 2]
+        if not self.compensate:
+            return self.tracker.update(dets, frame_bgr)
         moved = FrameDetections(xyxy=_warp_boxes(dets.xyxy, self._to_ref), confidence=dets.confidence,
                                 class_name=dets.class_name, team=dets.team, keypoints=dets.keypoints,
                                 keypoint_scores=dets.keypoint_scores, role=dets.role)
@@ -1153,8 +1160,8 @@ def production_pipeline(detector_size: str = "medium", threshold: float = 0.5, d
         calibrator = FrameCalibrator(segmenter=segmenter)
     pose = RTMPoseEstimator(device=(pose_device or ("cuda" if dev.startswith("cuda") else "cpu"))) if with_pose else None
     tracker: Tracker = ByteTrackTracker(frame_rate=frame_rate)
-    if motion_compensation or stitch:
-        tracker = MotionCompensatedTracker(tracker)
+    if motion_compensation or stitch:  # re-linking needs the reference maps, not the compensated tracking
+        tracker = MotionCompensatedTracker(tracker, compensate=motion_compensation)
     stitch_cfg = None
     if stitch:
         from .stitching import StitchConfig
