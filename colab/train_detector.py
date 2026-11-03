@@ -26,7 +26,7 @@ from run_clips import ColabSession, printing_runner, subprocess_runner  # noqa: 
 
 WORKER = HERE / "detector_worker.py"
 REMOTE = "/content/det/out"
-RFDETR_PIN = "rfdetr==1.11.2"  # as in requirements-vision.txt
+RFDETR_PIN = "rfdetr[train,loggers]==1.11.2"  # as in requirements-vision.txt, plus the training extras (Lightning)
 OUTPUTS = ("checkpoint.pth", "checkpoint_best_total.pth", "log.txt")
 
 

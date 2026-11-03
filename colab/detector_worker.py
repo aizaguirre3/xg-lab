@@ -166,6 +166,9 @@ def check(weights: str = "", n_images: int = 4, threshold: float = 0.4) -> dict:
     out = WORK / "out"
     w = weights or next((str(out / n) for n in ("checkpoint_best_total.pth", "checkpoint_best_ema.pth",
                                                 "checkpoint_best_regular.pth", "checkpoint.pth") if (out / n).exists()), "")
+    if not w:
+        print("no checkpoint in", out, flush=True)
+        return {}
     model = rfdetr.RFDETRMedium(pretrain_weights=w)
     print("weights", w, "class_names", getattr(model, "class_names", None), flush=True)
     coco = json.loads((WORK / "data" / "valid" / "_annotations.coco.json").read_text())
