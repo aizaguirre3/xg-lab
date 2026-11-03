@@ -126,16 +126,24 @@ def _flip_table():
     return table
 
 
+def _worker_init(_k):
+    import cv2
+
+    cv2.setNumThreads(0)  # one decode thread per loader process: a few vCPUs are shared by all of them
+
+
 def train(minutes: float = 8.0, epochs: int = 30, batch: int = 16, lr: float = 1e-3, workers: int = 8,
-          bg_weight: float = 0.05, seed: int = 0) -> dict:
-    """Train (resuming from ``ckpt.pt``) until ``minutes`` have passed or ``epochs`` are done; a
-    checkpoint is written after every epoch. Validation: per-class IoU on the held-out clips."""
+          bg_weight: float = 0.05, seed: int = 0, steps_per_epoch: int = 200) -> dict:
+    """Train (resuming from ``ckpt.pt``) until ``minutes`` have passed or ``epochs`` are done. An "epoch"
+    here is ``steps_per_epoch`` random batches, so the time limit is checked every minute or two and a
+    checkpoint is written that often; ``progress.txt`` is rewritten every 20 steps (readable with
+    ``colab download`` while the kernel is busy). Validation: per-class IoU on the held-out clips."""
     import random
 
     import cv2
     import numpy as np
     import torch
-    from torch.utils.data import DataLoader, Dataset
+    from torch.utils.data import DataLoader, Dataset, RandomSampler
 
     from varlab_vision.line_seg import MEAN, N_CLASSES, STD, build_model
 
@@ -173,9 +181,14 @@ def train(minutes: float = 8.0, epochs: int = 30, batch: int = 16, lr: float = 1
         model.load_state_dict(saved["model"])
         opt.load_state_dict(saved["opt"])
         state = saved["state"]
-    tr = DataLoader(Frames(split["train"], True), batch_size=batch, shuffle=True, num_workers=workers, drop_last=True,
-                    pin_memory=True, persistent_workers=False)
-    va = DataLoader(Frames(split["val"], False), batch_size=batch, shuffle=False, num_workers=workers)
+    workers = max(1, min(workers, (os.cpu_count() or 2)))
+    train_set = Frames(split["train"], True)
+    tr = DataLoader(train_set, batch_size=batch, num_workers=workers, drop_last=True, pin_memory=True,
+                    worker_init_fn=_worker_init,
+                    sampler=RandomSampler(train_set, replacement=True, num_samples=steps_per_epoch * batch))
+    va = DataLoader(Frames(split["val"], False), batch_size=batch, shuffle=False, num_workers=workers,
+                    worker_init_fn=_worker_init)
+    print(f"{len(train_set)} training frames, {workers} loader workers, {os.cpu_count()} vCPUs", flush=True)
     weight = torch.ones(N_CLASSES, device=dev)
     weight[0] = bg_weight
     loss_fn = torch.nn.CrossEntropyLoss(weight=weight)
@@ -197,8 +210,11 @@ def train(minutes: float = 8.0, epochs: int = 30, batch: int = 16, lr: float = 1
             scaler.scale(loss).backward()
             scaler.step(opt)
             scaler.update()
-            tot += float(loss)
+            tot += float(loss.detach())
             nb += 1
+            if nb % 20 == 0:
+                (WORK / "progress.txt").write_text(f"epoch {state['epoch'] + 1} step {nb}/{len(tr)} "
+                                                   f"loss {tot / nb:.4f} {time.time() - t0:.0f} s\n")
         model.eval()
         inter = torch.zeros(N_CLASSES, device=dev)
         union = torch.zeros(N_CLASSES, device=dev)

@@ -76,13 +76,40 @@ def _wall_timeout(cmd: List[str]) -> float:
 
 
 def subprocess_runner(cmd: List[str], stdin_text: Optional[str] = None) -> CmdResult:
+    """Run one CLI call under the hard limit. A watchdog thread kills the call as well: on 2026-11-03 a
+    ``colab exec`` whose VM had vanished outlived its ``subprocess.run`` timeout by ten minutes."""
+    import threading
+
+    proc_box: list = []
+    limit = _wall_timeout(cmd)
+
+    def _kill():
+        for p_ in proc_box:
+            if p_.poll() is None:
+                sys.stderr.write(f"[run_clips] watchdog: killing {' '.join(cmd[:3])} after {limit + 30:.0f} s\n")
+                p_.kill()
+
+    timer = threading.Timer(limit + 30.0, _kill)
+    timer.daemon = True
+    timer.start()
     try:
-        p = subprocess.run(cmd, input=stdin_text, text=True, capture_output=True, timeout=_wall_timeout(cmd))
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE if stdin_text is not None else None,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        proc_box.append(proc)
+        try:
+            out, err = proc.communicate(stdin_text, timeout=limit)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            out, err = proc.communicate()
+            raise subprocess.TimeoutExpired(cmd, limit, output=out, stderr=err)
+        p = subprocess.CompletedProcess(cmd, proc.returncode, out, err)
     except subprocess.TimeoutExpired as e:
         out = e.stdout.decode() if isinstance(e.stdout, bytes) else (e.stdout or "")
         msg = f"timed out after {_wall_timeout(cmd):.0f} s (local limit)"
         sys.stderr.write(f"[run_clips] {' '.join(cmd[:3])} {msg}\n")
         return CmdResult(124, out, msg)
+    finally:
+        timer.cancel()
     if p.stdout:
         sys.stdout.write(p.stdout if p.stdout.endswith("\n") else p.stdout + "\n")
     if p.stderr:
