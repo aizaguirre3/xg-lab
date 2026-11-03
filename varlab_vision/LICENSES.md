@@ -37,5 +37,11 @@ The camera-to-pitch calibration (`pitch_model.py` and `calibration.py`, added
 which are already listed above, so it adds no dependency, and it reads no code
 from PnLCalib, TrackLab or sn-gamestate.
 
+The pitch-line segmenter (`line_seg.py`, added 2026-11-03) is our own U-Net on a
+torchvision ResNet-18 (BSD-3-Clause; ImageNet weights from torchvision), trained
+on the SoccerNet GSR train labels. The dataset card says GPL-3.0, so the trained
+weights stay out of the repository like the data (`data/models/`, gitignored),
+and nothing from the dataset is redistributed.
+
 Excluded on purpose: Ultralytics YOLO (AGPL-3.0), sn-gamestate and TrackLab
 (GPL-3.0), PnLCalib (GPL-2.0), RF-DETR Atto/Femto/Pico/XL/2XL (PML 1.0).
