@@ -570,6 +570,32 @@ class KMeansTeams:
         return d.argmin(axis=1)
 
 
+def team_clusters(feats: np.ndarray, outfield: np.ndarray, k: int = 2, seed: int = 0, whiten: int = 4) -> np.ndarray:
+    """k-means cluster of each crop (-1 for crops not in ``outfield``) on the outfield players' crop
+    embeddings, unit-normalised and whitened along their first ``whiten`` principal directions.
+
+    Unwhitened, the largest directions of a SigLIP crop embedding are pose, size and background more
+    than kit: on five held-out GSR train clips (fine-tuned detector, fragments re-linked) k-means on
+    the raw embeddings got 0.685 of the matched players' teams right and on the whitened ones 0.843
+    (0.843 with 2, 4 or 8 directions; 0.60 with 32, where noise directions are inflated too).
+    Low-dimensional features (the smoke test's 3-D mean colour) are already mostly kit, and
+    whitening them only inflates the odd one out (a referee in black), so they are left as they are.
+    """
+    feats = np.asarray(feats, float)
+    out = np.full(len(feats), -1)
+    x = feats[outfield]
+    if len(x) < k:
+        return out
+    x = x / np.maximum(np.linalg.norm(x, axis=1, keepdims=True), 1e-12)
+    if whiten and x.shape[1] >= 8 * whiten:
+        mu = x.mean(axis=0)
+        _u, sv, vt = np.linalg.svd(x - mu, full_matrices=False)
+        m = min(whiten, len(sv), x.shape[1])
+        x = (x - mu) @ vt[:m].T / np.maximum(sv[:m] / np.sqrt(len(x)), 1e-12)
+    out[outfield] = KMeansTeams(k=k, seed=seed).fit(x).predict(x)
+    return out
+
+
 def track_roles(per_frame) -> Dict[int, str]:
     """Majority detector role of each track (tracks whose detector gave no roles are left out)."""
     votes: Dict[int, Dict[str, int]] = {}
@@ -765,7 +791,7 @@ class VisionPipeline:
                  projector: Optional[PitchProjector] = None, frame_rate: float = 25.0,
                  max_crops_per_track: int = 20, team_k: int = 2, seed: int = 0,
                  calibrator: Optional["FrameCalibrator"] = None, crop_every: int = 10, stitch=None,
-                 jersey_reader=None):
+                 jersey_reader=None, team_whiten: int = 4):
         self.detector = detector
         self.tracker = tracker if tracker is not None else default_tracker(frame_rate)
         self.embedder = embedder
@@ -780,6 +806,7 @@ class VisionPipeline:
         self.stitch = stitch  # a stitching.StitchConfig: re-link track fragments before the teams (needs the
         # motion-compensated tracker for positions that ignore the pan)
         self.jersey_reader = jersey_reader  # a jersey.JerseyReader: a number per track from its crops
+        self.team_whiten = team_whiten  # principal directions whitened before the team k-means (0: none)
         self._registrar, self._motion, self._shot_sig = None, None, None  # set per clip with a motion-compensated tracker
 
     def backends(self) -> Dict[str, str]:
@@ -956,9 +983,7 @@ class VisionPipeline:
             roles = track_roles(per_frame)
             outfield = np.array([roles.get(t, "player") == "player" for t in tids], bool)
             if int(outfield.sum()) >= self.team_k and len({t for t, o in zip(tids, outfield) if o}) >= self.team_k:
-                km = KMeansTeams(k=self.team_k, seed=self.seed).fit(feats[outfield])
-                cluster = np.full(len(tids), -1)
-                cluster[outfield] = km.predict(feats[outfield])
+                cluster = team_clusters(feats, outfield, self.team_k, self.seed, self.team_whiten)
                 px = track_pitch_x(per_frame, calib) if self.calibrator is not None else None
                 team_of = assign_teams(np.array(tids), cluster, np.array(cxs), roles=roles, pitch_x=px)
             else:

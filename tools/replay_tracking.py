@@ -50,7 +50,8 @@ def _calib(rows):
     return out
 
 
-def replay_clip(cache: dict, name: str, stitch_cfg: StitchConfig | None, team_k: int = 2, seed: int = 0):
+def replay_clip(cache: dict, name: str, stitch_cfg: StitchConfig | None, team_k: int = 2, seed: int = 0,
+                whiten: int = 4):
     """The clip's GSR predictions rebuilt from its cache; returns (clip, n fragments, n tracks)."""
     per_frame, tids, feats, cxs = cache["per_frame"], list(cache["tids"]), np.asarray(cache["feats"]), cache["cxs"]
     calib = _calib(cache["calib"]) if cache["calib"] else None  # none when the run had no calibrator
@@ -68,9 +69,7 @@ def replay_clip(cache: dict, name: str, stitch_cfg: StitchConfig | None, team_k:
     outfield = np.array([roles.get(t, "player") == "player" for t in tids], bool)
     team_of = {}
     if int(outfield.sum()) >= team_k:
-        km = pl.KMeansTeams(k=team_k, seed=seed).fit(feats[outfield])
-        cluster = np.full(len(tids), -1)
-        cluster[outfield] = km.predict(feats[outfield])
+        cluster = pl.team_clusters(feats, outfield, team_k, seed, whiten)
         team_of = pl.assign_teams(np.array(tids), cluster, np.array(cxs), roles=roles,
                                   pitch_x=pl.track_pitch_x(per_frame, calib) if calib else None)
     pipe = pl.VisionPipeline.__new__(pl.VisionPipeline)

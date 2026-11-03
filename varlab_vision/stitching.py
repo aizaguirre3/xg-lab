@@ -50,11 +50,16 @@ class Tracklet:
 
 @dataclass
 class StitchConfig:
-    max_gap: int = 50  # frames between the end of one fragment and the start of the next (2 s at 25 fps)
-    radius0: float = 0.6  # body heights allowed at a gap of one frame
-    speed: float = 0.2  # body heights per frame a player can cover (about 9 m/s at 25 fps)
+    """Defaults chosen on five held-out GSR train clips (fine-tuned detector, motion-compensated
+    ByteTrack): IDF1 0.689 -> 0.781, 252 -> 148 tracks for 118 people, ID switches 481 -> 433. IDF1
+    rose with ``max_gap`` up to 300 frames and stayed flat beyond; at such gaps the radius covers most
+    of the view, so time, role and appearance decide."""
+
+    max_gap: int = 300  # frames between the end of one fragment and the start of the next (12 s at 25 fps)
+    radius0: float = 0.8  # body heights allowed at a gap of one frame
+    speed: float = 0.3  # body heights per frame the allowed radius grows by
     max_velocity_frames: int = 12  # the end velocity is extrapolated over at most this many frames
-    max_appearance: float = 0.35  # cosine distance above which two fragments are not the same player
+    max_appearance: float = 0.25  # cosine distance above which two fragments are not the same player
     appearance_weight: float = 1.0
 
 

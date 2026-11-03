@@ -53,7 +53,8 @@ def test_what_keeps_two_fragments_apart(change):
     if change == "overlap":
         b = _continue(a, 2, 30, 80, **kw)
     if change == "gap":
-        b = _continue(a, 2, 40 + StitchConfig().max_gap + 1, 120, **kw)
+        f0 = 40 + StitchConfig().max_gap + 1
+        b = _continue(a, 2, f0, f0 + 30, **kw)
     assert stitch([a, b]) == {1: 1, 2: 2}
 
 

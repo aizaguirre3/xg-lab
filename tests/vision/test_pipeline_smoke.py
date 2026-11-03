@@ -170,3 +170,22 @@ def test_track_roles_take_the_majority():
                                               tracker_id=np.array(ids), role=np.array(roles, dtype=object)))
     frames = [fd([1, 2], ["player", "referee"]), fd([1, 2], ["goalkeeper", "referee"]), fd([1], ["player"])]
     assert pl.track_roles(frames) == {1: "player", 2: "referee"}
+
+
+def test_team_clusters_whiten_high_dimensional_embeddings():
+    rng = np.random.default_rng(0)
+    n = 200
+    team = rng.integers(0, 2, n)
+    # 64-D embeddings: a big nuisance direction (pose) and a small one that is the kit
+    x = np.zeros((n, 64))
+    x[:, 0] = rng.normal(0, 5.0, n)  # nuisance, much larger than the kit signal
+    x[:, 1] = np.where(team == 1, 1.0, -1.0) + rng.normal(0, 0.1, n)
+    x[:, 2:] = rng.normal(0, 0.05, (n, 62))
+    x += 10.0  # embeddings live away from the origin
+    outfield = np.ones(n, bool)
+    def agree(c):
+        return max(np.mean(c == team), np.mean(c != team))
+    assert agree(pl.team_clusters(x, outfield, whiten=0)) < 0.8
+    assert agree(pl.team_clusters(x, outfield, whiten=4)) > 0.95
+    outfield[:10] = False
+    assert (pl.team_clusters(x, outfield)[:10] == -1).all()
