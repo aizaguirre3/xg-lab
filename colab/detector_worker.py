@@ -152,3 +152,28 @@ def train(epochs: int = 12, batch_size: int = 4, grad_accum_steps: int = 4, lr: 
     model.train(**kw)
     print(f"train returned after {time.time() - t0:.0f} s; outputs: {sorted(p.name for p in out.iterdir())}", flush=True)
     return str(out)
+
+
+def check(weights: str = "", n_images: int = 4, threshold: float = 0.4) -> dict:
+    """Run the fine-tuned model on a few held-out frames and count the class ids it gives against the
+    labelled categories, so the pipeline's ``classes`` mapping is read off the model, not assumed."""
+    import collections
+
+    import numpy as np
+    import rfdetr
+    from PIL import Image
+
+    out = WORK / "out"
+    w = weights or next((str(out / n) for n in ("checkpoint_best_total.pth", "checkpoint_best_ema.pth",
+                                                "checkpoint_best_regular.pth", "checkpoint.pth") if (out / n).exists()), "")
+    model = rfdetr.RFDETRMedium(pretrain_weights=w)
+    print("weights", w, "class_names", getattr(model, "class_names", None), flush=True)
+    coco = json.loads((WORK / "data" / "valid" / "_annotations.coco.json").read_text())
+    gt = collections.Counter(a["category_id"] for a in coco["annotations"]
+                             if a["image_id"] in {im["id"] for im in coco["images"][:n_images]})
+    pred = collections.Counter()
+    for im in coco["images"][:n_images]:
+        det = model.predict(Image.open(WORK / "data" / "valid" / im["file_name"]), threshold=threshold)
+        pred.update(int(c) for c in np.asarray(det.class_id))
+    print("labelled categories", dict(gt), "predicted class ids", dict(pred), flush=True)
+    return {"weights": w, "gt": dict(gt), "pred": dict(pred)}

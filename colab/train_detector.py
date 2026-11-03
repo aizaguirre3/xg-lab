@@ -77,6 +77,10 @@ def run(args: argparse.Namespace) -> int:
                 session.download(f"{REMOTE}/{name}", out / name)
             except RuntimeError as e:
                 print(f"[train_detector] {name}: {e}")
+        try:
+            session.exec_code("check()", timeout=600)  # the class ids the model gives, for the pipeline's mapping
+        except RuntimeError as e:
+            print(f"[train_detector] check failed: {e}")
     finally:
         session.stop()
         print(session.sessions())
