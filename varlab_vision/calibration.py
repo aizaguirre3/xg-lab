@@ -2726,6 +2726,13 @@ class FrameCalibrator:
 # error looks many times larger than it is where the gap is. A gap open at one end (the start or
 # the end of a shot, or a failed motion) is bridged for at most ``one_sided_max`` frames, with
 # nothing to check it against. A shot cut or a failed motion breaks every chain through it.
+#
+# The defaults were chosen on train clips SNGS-060, 064, 072, 099 and 103 (every frame, tracked,
+# labelled person boxes as the people mask): bridging lifts the claimed frames from 51.0% to 66.9%
+# and the labelled people placed within 1 m from 45.6% to 59.3%, with the precision of the claim
+# (median error under 1 m) going from 99.3% to 98.8%. The two-sided bridges that miss (16 of 585)
+# sit between fits that were themselves off; agree_m 0.5 m bridges a quarter fewer frames and misses
+# almost as many (15). One-sided bridges were all right up to 5 frames, but 5 of the next 22 missed.
 
 
 def homography_shift_m(h_a_m2px: np.ndarray, h_b_m2px: np.ndarray, width: int, height: int) -> float:
@@ -2742,7 +2749,7 @@ def homography_shift_m(h_a_m2px: np.ndarray, h_b_m2px: np.ndarray, width: int, h
 
 
 def bridge_gaps(results: Sequence[CalibrationResult], width: int, height: int, model: PitchModel = DEFAULT_PITCH,
-                max_gap: int = 250, one_sided_max: int = 25, agree_m: float = 0.5) -> List[CalibrationResult]:
+                max_gap: int = 250, one_sided_max: int = 5, agree_m: float = 1.0) -> List[CalibrationResult]:
     """The clip's results with the uncalibrated frames that the camera's motion links to calibrated
     frames replaced by bridged ones (status ``bridged``); everything else is returned as it is.
 

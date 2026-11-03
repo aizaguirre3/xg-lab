@@ -198,8 +198,8 @@ def main(argv=None) -> int:
     ap.add_argument("--frames", default=None,
                     help="folder of whole clips already extracted (<clip>/img1/*.jpg and labels); no network")
     ap.add_argument("--no-bridge", action="store_true", help="tracked: score the results without bridge_gaps")
-    ap.add_argument("--bridge-agree-m", type=float, default=0.5)
-    ap.add_argument("--bridge-one-sided", type=int, default=25)
+    ap.add_argument("--bridge-agree-m", type=float, default=1.0)
+    ap.add_argument("--bridge-one-sided", type=int, default=5)
     ap.add_argument("--bridge-max-gap", type=int, default=250)
     ap.add_argument("--save-results", default=None, help="tracked: pickle the raw results here to re-score later")
     ap.add_argument("--segmenter", default=None, help="line segmenter weights (varlab_vision.line_seg); names the lines")
