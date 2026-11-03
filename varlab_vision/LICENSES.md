@@ -37,5 +37,13 @@ The camera-to-pitch calibration (`pitch_model.py` and `calibration.py`, added
 which are already listed above, so it adds no dependency, and it reads no code
 from PnLCalib, TrackLab or sn-gamestate.
 
+RF-DETR Medium fine-tuned on the GSR train boxes (`colab/train_detector.py`, added
+2026-11-03) starts from the Apache-2.0 COCO weights above; the jersey-number reader
+(`jersey.py`) is our own head on a torchvision ResNet-18. Both are trained on the
+GSR train labels (dataset card: GPL-3.0), so, like the line segmenter, their weights
+stay in the gitignored `data/models/` and are not published. Training RF-DETR needs
+the package's `train` and `loggers` extras (PyTorch Lightning, Apache-2.0), installed
+only on the training VM.
+
 Excluded on purpose: Ultralytics YOLO (AGPL-3.0), sn-gamestate and TrackLab
 (GPL-3.0), PnLCalib (GPL-2.0), RF-DETR Atto/Femto/Pico/XL/2XL (PML 1.0).
