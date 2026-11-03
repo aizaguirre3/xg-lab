@@ -14,6 +14,7 @@ outside the destination folder.
 """
 from __future__ import annotations
 
+import http.client
 import re
 import time
 import urllib.error
@@ -40,7 +41,8 @@ def http_range_fetcher(url: str, token: Optional[str] = None, timeout: float = 1
 
     Redirects (Hugging Face sends a 302 to its storage) are followed by urllib, which
     keeps the ``Range`` header. The size comes from the ``Content-Range`` of a
-    one-byte request. Transient failures are retried with backoff.
+    one-byte request. Transient failures (network errors, timeouts, a body cut short) are retried
+    with backoff.
     """
     headers = {"User-Agent": user_agent}
     if token:
@@ -55,7 +57,8 @@ def http_range_fetcher(url: str, token: Optional[str] = None, timeout: float = 1
                     if resp.status != 206:
                         raise IOError(f"expected 206 Partial Content, got {resp.status} for {url}")
                     return resp.read(), resp.headers.get("Content-Range", "")
-            except (urllib.error.URLError, TimeoutError, ConnectionError, IOError) as e:
+            except (urllib.error.URLError, TimeoutError, ConnectionError, IOError, http.client.HTTPException) as e:
+                # HTTPException covers IncompleteRead, a connection dropped mid-body (seen 2026-11-03)
                 if attempt == retries - 1:
                     raise IOError(f"range {start}-{end_inclusive} of {url} failed after {retries} tries: {e}") from e
                 if log is not None:
