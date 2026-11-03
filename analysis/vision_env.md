@@ -557,7 +557,9 @@ trained on Colab (`colab/train_line_seg.py`) on every 5th frame of 52 train clip
 (7,650 frames), with a mirrored-pitch flip that swaps left and right names. The
 five calibration tuning clips (SNGS-060, -064, -072, -099, -103) are held out:
 their mean IoU over the classes in view reached 0.72 after 1,800 steps (9 rounds of
-200; about 6 minutes on the L4). The SoccerNet-to-PitchModel name mapping was
+200; about 6 minutes on the L4). Those clips come from games 4 and 6, which other
+train clips also cover, so that IoU flatters the network; the validation games
+(2, 3 and 5) are in no train clip, and the validation numbers below are clean. The SoccerNet-to-PitchModel name mapping was
 checked against cameras fitted to the labelled feet. Its weights stay out of the
 repository (the dataset card says GPL-3.0).
 
@@ -591,6 +593,17 @@ frames that still fail with "too few lines", the network itself sees two lines o
 each family and a circle; the extractor misses them (faint or broken strokes).
 Seeding the extractor's robust refit from the network's lines is the next step,
 and the network was trained for 9 of its planned 30 rounds.
+
+**With bridging, as the pipeline runs it** (the nine validation clips of the
+bridging section, every frame, tracked; the network runs only on frames whose
+tracking fails, 234 of them solved from named lines):
+
+| | Tracked | + named lines | + named lines + bridging |
+|---|---|---|---|
+| Frames claimed | 51.0% | 54.3% | 77.2% |
+| Precision of the claim | 97.7% | 97.4% | 96.4% |
+| Claimed frames over 5 m | 3 | 3 | 3 |
+| Labelled people within 1 m | 50.5% | 52.1% | 69.9% |
 
 ## Detector, tracking, teams and jersey numbers (2026-11-03)
 
