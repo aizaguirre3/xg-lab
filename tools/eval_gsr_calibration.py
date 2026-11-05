@@ -69,17 +69,33 @@ def summarise(errs: np.ndarray) -> dict:
             "within_5m": round(float(np.mean(errs < 5.0)), 4)}
 
 
-def frame_result(jpeg: bytes, gt: np.ndarray, use_boxes: bool) -> dict:
+_SEGMENTER = {}
+
+
+def _segmenter(path):
+    """The line segmenter for this process (loaded once, on the CPU: one per worker process)."""
+    if not path:
+        return None
+    if path not in _SEGMENTER:
+        from varlab_vision.line_seg import LineSegmenter
+
+        _SEGMENTER[path] = LineSegmenter(path, device="cpu")
+    return _SEGMENTER[path]
+
+
+def frame_result(jpeg: bytes, gt: np.ndarray, use_boxes: bool, seg_path: str | None = None) -> dict:
     """Calibrate one frame; ``gt`` is (N, 6): x, y, w, h (pixels) and x_pitch, y_pitch (metres) per person."""
     import cv2
 
     img = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
     boxes = np.stack([gt[:, 0], gt[:, 1], gt[:, 0] + gt[:, 2], gt[:, 1] + gt[:, 3]], axis=1) if len(gt) else None
+    seg = _segmenter(seg_path)
     t0 = time.perf_counter()
-    res = cal.calibrate_frame(img, person_boxes=boxes if use_boxes else None)
+    res = cal.calibrate_frame(img, person_boxes=boxes if use_boxes else None,
+                              line_labels=(lambda: seg.labels(img)) if seg is not None else None)
     out = {"status": res.status, "seconds": round(time.perf_counter() - t0, 3), "n_lines": res.n_lines,
            "n_inliers": res.n_inliers, "n_curves": len(res.arc_matches), "note": res.note[:160],
-           "refused": res.note.startswith("refused")}
+           "refused": res.note.startswith("refused"), "named": "named lines" in res.note}
     if res.ok and len(gt):
         feet = np.stack([gt[:, 0] + gt[:, 2] / 2, gt[:, 1] + gt[:, 3]], axis=1)
         err = np.linalg.norm(res.project(feet) - gt[:, 4:6], axis=1)
@@ -90,13 +106,13 @@ def frame_result(jpeg: bytes, gt: np.ndarray, use_boxes: bool) -> dict:
 
 
 def _work(args):
-    jpeg, gt, use_boxes = args
-    return frame_result(jpeg, gt, use_boxes)
+    jpeg, gt, use_boxes, seg_path = args
+    return frame_result(jpeg, gt, use_boxes, seg_path)
 
 
 def _errors_row(res, gt: np.ndarray, seconds: float) -> dict:
     out = {"status": res.status, "seconds": round(seconds, 4), "n_inliers": res.n_inliers, "note": res.note[:160],
-           "refused": res.note.startswith("refused")}
+           "refused": res.note.startswith("refused"), "named": "named lines" in res.note}
     if res.ok and len(gt):
         feet = np.stack([gt[:, 0] + gt[:, 2] / 2, gt[:, 1] + gt[:, 3]], axis=1)
         err = np.linalg.norm(res.project(feet) - gt[:, 4:6], axis=1)
@@ -107,16 +123,16 @@ def _errors_row(res, gt: np.ndarray, seconds: float) -> dict:
 
 
 def _work_tracked(frames: list) -> tuple:
-    """One clip in order through a FrameCalibrator: ``frames`` is [(jpeg, gt, use_boxes), ...].
+    """One clip in order through a FrameCalibrator: ``frames`` is [(jpeg, gt, use_boxes, seg_path), ...].
 
     Returns the per-frame results (without their marking lists, so they pickle small) and the
     seconds each took; the caller scores them, with and without bridging.
     """
     import cv2
 
-    fc = cal.FrameCalibrator()
+    fc = cal.FrameCalibrator(segmenter=_segmenter(frames[0][3]) if frames else None)
     results, seconds, t_prev = [], [], time.perf_counter()
-    for jpeg, gt, use_boxes in frames:
+    for jpeg, gt, use_boxes, _seg in frames:
         img = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
         boxes = np.stack([gt[:, 0], gt[:, 1], gt[:, 0] + gt[:, 2], gt[:, 1] + gt[:, 3]], axis=1) if len(gt) else None
         for res in fc.push(img, person_boxes=boxes if use_boxes else None):
@@ -152,6 +168,7 @@ def summary_of(rows: list, n_labelled_total: int) -> dict:
         "frames": n, "statuses": statuses,
         "calibrated_share": round(len(claimed) / max(1, n), 4),
         "refused": int(sum(r.get("refused", False) for r in rows)),
+        "from_named_lines": int(sum(r.get("named", False) for r in rows)),
         "claimed_frames_with_people": int(len(meds)),
         "claimed_by_median": {"under_1m": int((meds < 1).sum()), "1_to_5m": int(((meds >= 1) & (meds < 5)).sum()),
                               "over_5m": int((meds >= 5).sum())},
@@ -185,6 +202,7 @@ def main(argv=None) -> int:
     ap.add_argument("--bridge-one-sided", type=int, default=5)
     ap.add_argument("--bridge-max-gap", type=int, default=250)
     ap.add_argument("--save-results", default=None, help="tracked: pickle the raw results here to re-score later")
+    ap.add_argument("--segmenter", default=None, help="line segmenter weights (varlab_vision.line_seg); names the lines")
     ap.add_argument("--out", required=True)
     args = ap.parse_args(argv)
 
@@ -217,7 +235,7 @@ def main(argv=None) -> int:
                     continue
                 jpeg = path.read_bytes()
                 g = df[df["frame"] == fi][["x", "y", "w", "h", "x_pitch", "y_pitch"]].to_numpy(float)
-                jobs.append((jpeg, g, args.person_mask == "labels"))
+                jobs.append((jpeg, g, args.person_mask == "labels", args.segmenter))
                 keys.append((clip, fi))
                 n_labelled[clip] = n_labelled.get(clip, 0) + len(g)
                 continue
@@ -233,7 +251,7 @@ def main(argv=None) -> int:
                     cached.parent.mkdir(parents=True, exist_ok=True)
                     cached.write_bytes(jpeg)
             g = df[df["frame"] == fi][["x", "y", "w", "h", "x_pitch", "y_pitch"]].to_numpy(float)
-            jobs.append((jpeg, g, args.person_mask == "labels"))
+            jobs.append((jpeg, g, args.person_mask == "labels", args.segmenter))
             keys.append((clip, fi))
             n_labelled[clip] = n_labelled.get(clip, 0) + len(g)
     print(f"read {len(jobs)} frames of {len(clips)} clips ({time.time() - t_start:.0f} s)", flush=True)
@@ -256,7 +274,7 @@ def main(argv=None) -> int:
     extra: dict = {}
     if args.tracked:
         gts = {}
-        for (clip, _fi), (_j, g, _b) in zip(keys, jobs):
+        for (clip, _fi), (_j, g, _b, _s) in zip(keys, jobs):
             gts.setdefault(clip, []).append(g)
         raw = dict(zip(by_clip, results))
         if args.save_results:
@@ -272,7 +290,7 @@ def main(argv=None) -> int:
         results = [r for clip, (res, sec, size) in raw.items() for r in tracked_rows(res, sec, gts[clip], size, bridge_kw)]
         extra["bridge"] = bridge_kw
     per_clip: dict = {}
-    for (clip, fi), r, (_j, g, _b) in zip(keys, results, jobs):
+    for (clip, fi), r, (_j, g, _b, _s) in zip(keys, results, jobs):
         r["frame"] = fi
         r["n_labelled"] = int(len(g))
         per_clip.setdefault(clip, {"rows": []})["rows"].append(r)
@@ -287,6 +305,7 @@ def main(argv=None) -> int:
                "mode": "tracked (FrameCalibrator, frame stride)" if args.tracked else "each frame from scratch",
                "person_mask": ("labelled person boxes (stand-in for the detector's)" if args.person_mask == "labels"
                                else "none"),
+               "segmenter": args.segmenter,
                **summary_of(results, sum(n_labelled.values())), **extra,
                "network_mb": round(rf.bytes_fetched / 1e6, 1) if rf is not None else 0.0,
                "wall_seconds": round(time.time() - t_start, 1)}

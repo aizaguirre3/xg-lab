@@ -4,6 +4,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -195,9 +196,23 @@ def test_the_runner_enforces_its_own_wall_clock_limit(monkeypatch):
     assert rc._wall_timeout(["colab", "exec", "-s", "x", "--timeout", "900.0"]) == 1020.0
     assert rc._wall_timeout(["colab", "download", "-s", "x", "a", "b"]) == 600.0
 
-    def hang(cmd, **kw):
-        raise rc.subprocess.TimeoutExpired(cmd, kw["timeout"], output="partial")
+    monkeypatch.setattr(rc, "_wall_timeout", lambda cmd: 0.5)
+    hang = [sys.executable, "-c", "import time; print('partial', flush=True); time.sleep(20)"]
+    t0 = time.monotonic()
+    res = rc.subprocess_runner(hang, stdin_text="ignored")
+    assert res.returncode == 124 and "timed out" in res.stderr and res.stdout.strip() == "partial"
+    assert time.monotonic() - t0 < 10
 
-    monkeypatch.setattr(rc.subprocess, "run", hang)
-    res = rc.subprocess_runner(["colab", "exec", "-s", "x", "--timeout", "1"])
-    assert res.returncode == 124 and "timed out" in res.stderr and res.stdout == "partial"
+
+def test_exec_checked_fails_on_a_traceback_in_the_output():
+    rc = load_module("run_clips")
+
+    def runner(cmd, stdin_text=None):
+        if "boom" in (stdin_text or ""):
+            return rc.CmdResult(0, "Traceback (most recent call last):\n  ...\nValueError: boom", "")
+        return rc.CmdResult(0, "fine", "")
+
+    s = rc.ColabSession("x", "L4", runner)
+    assert s.exec_checked("print(1)", 10).stdout == "fine"
+    with pytest.raises(RuntimeError, match="raised on the VM"):
+        s.exec_checked("boom()", 10)

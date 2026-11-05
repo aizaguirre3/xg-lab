@@ -30,6 +30,9 @@ PnLCalib (GPL-2) or TrackLab / sn-gamestate (GPL-3). The chain is
    minimising the pixel distances of the inlier segments' endpoints (and the matched
    ellipses' points) to the projected model markings, then again as a pinhole camera
    (focal length, rotation, position).
+   Before the blind search, a label map from the line segmenter (``line_seg.py``), when
+   given, names the extracted lines and the homography solved from them is tried first
+   (``named_line_homographies``, verified with ``NAMED_VERIFY``).
 6. ``verify_solution``: the evidence for a solution in the frame itself (marking support,
    unexplained lines, leave-one-out agreement, the camera it implies, the fit's standard
    error where the people are); ``VerifyConfig`` decides when it is refused.
@@ -1461,6 +1464,52 @@ def search_homography(lines: Sequence[ImageLine], width: int, height: int, model
     return best_h, matches, float(full[b])
 
 
+def named_line_homographies(lines: Sequence[ImageLine], names: Dict[int, str], width: int, height: int,
+                            model: PitchModel = DEFAULT_PITCH) -> List[np.ndarray]:
+    """Homographies (metres -> pixels) from extracted lines that a segmenter named (``{line index:
+    model line name}``, see :func:`varlab_vision.line_seg.name_lines`): a DLT on the line
+    correspondences (``H^T l_image ~ l_model``; their intersections lie far outside the frame for
+    nearly parallel lines and magnify small angle errors) as the start, then the least-squares fit of
+    every named line's endpoints to its model line (:func:`refine_homography`). The algebraic DLT
+    alone is several pixels off on a box seen at an angle (measured: 8 px at 640 px width with
+    every line within 0.3 px). Needs two distinct model lines of each family. With a third line in
+    either family the fits leaving out one line each follow the fit on all of them, so a single
+    wrong name cannot decide alone; the caller verifies each."""
+    by_name = {ln.name: ln for ln in model.lines()}
+    best: Dict[str, int] = {}  # one image line per model line: the longest
+    for i, nm in names.items():
+        if nm in by_name and (nm not in best or lines[i].length > lines[best[nm]].length):
+            best[nm] = i
+    xs = [nm for nm in best if by_name[nm].kind == X_CONST]
+    ys = [nm for nm in best if by_name[nm].kind == Y_CONST]
+    if len(xs) < 2 or len(ys) < 2:
+        return []
+    subsets = [(xs, ys)]
+    subsets += [([x for x in xs if x != d], ys) for d in xs] if len(xs) > 2 else []
+    subsets += [(xs, [y for y in ys if y != d]) for d in ys] if len(ys) > 2 else []
+    ends = np.concatenate([lines[i].endpoints() for i in best.values()])
+    c = ends.mean(axis=0)
+    s = max(1e-9, float(np.abs(ends - c).mean()))
+    t_px = np.array([[1.0 / s, 0.0, -c[0] / s], [0.0, 1.0 / s, -c[1] / s], [0.0, 0.0, 1.0]])
+    s_m = np.diag([1.0 / model.half_length, 1.0 / model.half_width, 1.0])
+    t_px_it, s_m_it = np.linalg.inv(t_px).T, np.linalg.inv(s_m).T  # lines transform by the inverse transpose
+    out = []
+    for sx, sy in subsets:
+        src = [t_px_it @ lines[best[nm]].abc for nm in sx + sy]
+        dst = [s_m_it @ (np.array([1.0, 0.0, -by_name[nm].value]) if by_name[nm].kind == X_CONST
+                         else np.array([0.0, 1.0, -by_name[nm].value])) for nm in sx + sy]
+        g = _dlt_points(np.array(src)[None], np.array(dst)[None])[0]  # G l ~ L with G = H^T (normalised)
+        h = np.linalg.inv(t_px) @ g.T @ s_m
+        if not np.isfinite(h).all() or abs(h[2, 2]) < 1e-12:
+            continue
+        keep = set(sx + sy)
+        matches = [LineMatch(i, nm, 0.0, 1.0) for i, nm in names.items() if nm in keep]
+        h = refine_homography(h / h[2, 2], lines, matches, model, width=width, height=height)
+        if np.isfinite(h).all():
+            out.append(h / h[2, 2])
+    return out
+
+
 def match_lines(h_m2px: np.ndarray, lines: Sequence[ImageLine], model: PitchModel = DEFAULT_PITCH,
                 tau_px: float = 4.0, tol_m: float = 2.0, min_extent: float = 0.7,
                 image_centre: Optional[Tuple[float, float]] = None) -> List[LineMatch]:
@@ -1942,6 +1991,13 @@ def verify_failures(v: Dict[str, object], cfg: VerifyConfig, width: int) -> List
 
 
 DEFAULT_VERIFY = VerifyConfig()
+# A solution from named lines has evidence the blind search lacks: the network said which marking
+# each line is. On 375 frames (every 10th) of the held-out train clips SNGS-060, -064, -072, -099 and
+# -103, the default checks let named solutions add 15 frames to the search's 174 (precision 98.9%);
+# letting up to half of the line length go unexplained (boards and shirts, which a named frame can
+# carry without the fit being a guess) adds 30 at 99.0%. Loosening the standard error at the people
+# to 0.25 m as well adds 76 but at 97.2%, so it is not done.
+NAMED_VERIFY = VerifyConfig(max_unexplained=0.5)
 
 
 def default_tau_px(width: int, tau_px: Optional[float] = None) -> float:
@@ -1956,7 +2012,8 @@ def calibrate_frame(frame_bgr: np.ndarray, model: PitchModel = DEFAULT_PITCH, pr
                     person_boxes: Optional[np.ndarray] = None, mask: str = "contrast",
                     use_arcs: bool = True, ellipse_kw: Optional[dict] = None,
                     verify: Optional[VerifyConfig] = None, arc_weight: float = 0.3,
-                    camera_fit: bool = True, max_alternatives: int = 3, search_camera_prior: bool = True) -> CalibrationResult:
+                    camera_fit: bool = True, max_alternatives: int = 3, search_camera_prior: bool = True,
+                    line_labels=None, named_verify: Optional[VerifyConfig] = None) -> CalibrationResult:
     """Calibrate one frame from scratch, or from ``prior_m2px`` (tracking) with a
     global search as the fallback. ``extra_priors`` are tried after ``prior_m2px``
     (for instance the previous solution when the first prior is an extrapolation)
@@ -1976,7 +2033,12 @@ def calibrate_frame(frame_bgr: np.ndarray, model: PitchModel = DEFAULT_PITCH, pr
     Every solution is checked against the frame (:func:`verify_solution`) and refused when ``verify``
     (default :data:`DEFAULT_VERIFY`) says so: a refused prior falls through to the next prior or to
     the global search, a refused global solution makes the frame ``uncalibrated``, with the reasons in
-    ``note`` and the evidence in ``verify``."""
+    ``note`` and the evidence in ``verify``.
+
+    ``line_labels`` (a label map from :class:`varlab_vision.line_seg.LineSegmenter`, or a callable
+    returning one, called only if the priors fail) names the extracted lines; the homographies from
+    the named lines (:func:`named_line_homographies`) are tried, and verified with ``named_verify``
+    (default :data:`NAMED_VERIFY`), before the global search."""
     h, w = frame_bgr.shape[:2]
     tau = default_tau_px(w, tau_px)
     tau_track = track_tau_px if track_tau_px is not None else 4.0 * tau
@@ -2004,7 +2066,7 @@ def calibrate_frame(frame_bgr: np.ndarray, model: PitchModel = DEFAULT_PITCH, pr
                                  note=f"{len(lines)} straight markings and {len(ellipses)} curves found, need 4 lines "
                                       "or 2 lines and a curve")
 
-    def finish(h0: np.ndarray, status: str, note: str) -> Optional[CalibrationResult]:
+    def finish(h0: np.ndarray, status: str, note: str, cfg: VerifyConfig = cfg) -> Optional[CalibrationResult]:
         hh = h0
         for round_tau in (tau_track if status == STATUS_TRACKED else tau * 2.0, tau):
             matches = match_lines(hh, lines, model, tau_px=round_tau)
@@ -2062,6 +2124,16 @@ def calibrate_frame(frame_bgr: np.ndarray, model: PitchModel = DEFAULT_PITCH, pr
         res = finish(prior, STATUS_TRACKED, "tracked from the previous frame")
         if res is not None and res.n_inliers >= min_tracked_inliers:
             return res
+    if line_labels is not None:
+        from .line_seg import name_lines
+
+        labels = line_labels() if callable(line_labels) else line_labels
+        names = name_lines(lines, labels, (w, h)) if labels is not None else {}
+        for k, h_named in enumerate(named_line_homographies(lines, names, w, h, model)):
+            res = finish(h_named, STATUS_CALIBRATED, f"from {len(names)} named lines" + (f" (subset {k})" if k else ""),
+                         named_verify if named_verify is not None else NAMED_VERIFY)
+            if res is not None:
+                return res
     ranked: List[Tuple[float, np.ndarray]] = []
     h_best, matches, score = search_homography(lines, w, h, model, tau_px=tau, ellipses=ellipses, ranked=ranked,
                                                camera_prior=cfg if (cfg.enabled and cfg.refuse and search_camera_prior) else None)
@@ -2310,7 +2382,8 @@ class FrameCalibrator:
     With ``register`` (the default) every frame's result carries ``motion``, the camera's
     motion from the previous frame measured by a :class:`~varlab_vision.registration.FrameRegistrar`
     (about 9 ms per 1080p frame on the Mac); ``bridge(results)`` then runs :func:`bridge_gaps`
-    over the clip's results.
+    over the clip's results. A ``segmenter`` (:class:`varlab_vision.line_seg.LineSegmenter`) is run
+    on a fitted frame only when tracking it fails, to name its lines before the global search.
     """
 
     name = "line-calibration"
@@ -2319,7 +2392,8 @@ class FrameCalibrator:
                  hold_frames: int = 5, min_inliers: int = 4, hist_threshold: float = CUT_HIST_THRESHOLD,
                  guard_px: Optional[float] = None, track_keep: float = 0.6, frame_stride: int = DEFAULT_FRAME_STRIDE,
                  steady_frames: int = 2, hold_tol_px: Optional[float] = None, close_tol_px: Optional[float] = None,
-                 align_tol_px: float = 0.05, support_keep: float = 0.8, register: bool = True, **calibrate_kw):
+                 align_tol_px: float = 0.05, support_keep: float = 0.8, register: bool = True, segmenter=None,
+                 **calibrate_kw):
         self.model = model
         self.cut_threshold = cut_threshold
         self.hist_threshold = hist_threshold
@@ -2336,6 +2410,7 @@ class FrameCalibrator:
         self.support_keep = support_keep
         self.calibrate_kw = calibrate_kw
         self._registrar = FrameRegistrar() if register else None
+        self.segmenter = segmenter  # names the lines when tracking fails (see calibrate_frame's line_labels)
         self._samples, self._sample_line = marking_samples(model)
         self._model_abc = np.stack([ln.homogeneous for ln in model.lines()], axis=0)
         self.reset()
@@ -2434,6 +2509,12 @@ class FrameCalibrator:
         self._p, self._v = p_new, v_new
         self._prior = res.h_m2px
 
+    def _labels_for(self, frame_bgr: np.ndarray):
+        """The segmenter's label map for this frame, deferred: calibrate_frame calls it only if tracking fails."""
+        if self.segmenter is None:
+            return None
+        return lambda: self.segmenter.labels(frame_bgr)
+
     def _alignment(self, frame_bgr: np.ndarray, h_m2px: np.ndarray) -> Tuple[float, float]:
         med, usable, _n = marking_alignment(frame_bgr, h_m2px, self._samples, self._sample_line, self._model_abc)
         return med, usable
@@ -2455,7 +2536,7 @@ class FrameCalibrator:
         floor = max(self.min_inliers, int(math.ceil(self.track_keep * self._n_inliers))) if prior is not None else 0
         res = calibrate_frame(frame_bgr, self.model, prior_m2px=prior, extra_priors=extra, min_inliers=self.min_inliers,
                               min_tracked_inliers=floor, person_boxes=self._boxes.get(self._frame_no),
-                              **self.calibrate_kw)
+                              line_labels=self._labels_for(frame_bgr), **self.calibrate_kw)
         res.shot_cut = bool(cut)
         self.last_prior_shift_px = (homography_shift_px(prior, res.h_m2px, w, h) if res.ok and prior is not None
                                     else float("nan"))
@@ -2560,7 +2641,8 @@ class FrameCalibrator:
             self.n_replayed += 1
             floor = max(self.min_inliers, int(math.ceil(self.track_keep * self._n_inliers)))
             out.append(calibrate_frame(frame, self.model, prior_m2px=hm, min_inliers=self.min_inliers,
-                                       min_tracked_inliers=floor, person_boxes=self._boxes.get(n), **self.calibrate_kw))
+                                       min_tracked_inliers=floor, person_boxes=self._boxes.get(n),
+                                       line_labels=self._labels_for(frame), **self.calibrate_kw))
         self.history[-1:-1] = [r.status for r in out]  # in frame order, before the closing fit
         if all(r.status == STATUS_INTERPOLATED for r in out):
             self._hold_max = min(self._hold_max + 1, self.frame_stride - 1)
