@@ -197,6 +197,55 @@ class SyntheticClip:
         return all(np.allclose(h, self.homographies[0]) for h in self.homographies)
 
 
+@dataclass(frozen=True)
+class TexturedWorld:
+    """The ground plane as one image: grass with mowing stripes, blotches and grain, the
+    markings drawn on it. Unlike the flat green of :func:`render_synthetic_clip`, its texture
+    moves with the camera, so frame-to-frame registration has something to track."""
+
+    image: np.ndarray  # BGR
+    m_per_px: float
+    origin_m: Tuple[float, float]  # pitch metres at the centre of pixel (0, 0)
+
+    def texture_to_m(self) -> np.ndarray:
+        s = self.m_per_px
+        return np.array([[s, 0.0, self.origin_m[0]], [0.0, s, self.origin_m[1]], [0.0, 0.0, 1.0]])
+
+
+def textured_world(seed: int = 0, m_per_px: float = 0.1, margin_m: float = 15.0,
+                   pitch: PitchModel = DEFAULT_PITCH, line_width_m: float = 0.12) -> TexturedWorld:
+    import cv2
+
+    rng = np.random.default_rng(seed)
+    x0, y0 = -pitch.half_length - margin_m, -pitch.half_width - margin_m
+    w = int(round(2 * (pitch.half_length + margin_m) / m_per_px)) + 1
+    h = int(round(2 * (pitch.half_width + margin_m) / m_per_px)) + 1
+    xs = x0 + np.arange(w) * m_per_px
+    img = np.empty((h, w, 3), np.float32)
+    img[:] = GREEN_BGR
+    img += (np.floor((xs + pitch.half_length) / 5.25) % 2 * 14.0 - 7.0)[None, :, None]  # stripes every 5.25 m
+    blotch = cv2.GaussianBlur(rng.normal(0.0, 1.0, (h, w)).astype(np.float32), (0, 0), 8.0)
+    grain = cv2.GaussianBlur(rng.normal(0.0, 1.0, (h, w)).astype(np.float32), (0, 0), 1.2)
+    img += (blotch * (10.0 / max(1e-6, float(blotch.std()))) + grain * (9.0 / max(1e-6, float(grain.std()))))[..., None]
+    img = np.clip(img, 0, 255).astype(np.uint8)
+    thick = max(1, int(round(line_width_m / m_per_px)))
+    for _name, poly in pitch.polylines(arc_step_deg=1.0):
+        fp = np.round((poly - np.array([x0, y0])) / m_per_px * 16.0).astype(np.int64)
+        for p, q in zip(fp[:-1], fp[1:]):
+            cv2.line(img, (int(p[0]), int(p[1])), (int(q[0]), int(q[1])), LINE_BGR, thickness=thick,
+                     lineType=cv2.LINE_AA, shift=4)
+    return TexturedWorld(image=img, m_per_px=m_per_px, origin_m=(x0, y0))
+
+
+def render_textured(camera: BroadcastCamera, world: TexturedWorld, border_bgr: Tuple[int, int, int] = (60, 60, 70)) -> np.ndarray:
+    """The camera's view of ``world`` (keep the horizon out of view: no sky is drawn)."""
+    import cv2
+
+    h = camera.homography_m2px() @ world.texture_to_m()
+    return cv2.warpPerspective(world.image, h, (camera.width, camera.height), flags=cv2.INTER_LINEAR,
+                               borderMode=cv2.BORDER_CONSTANT, borderValue=border_bgr)
+
+
 def _box_track(cams: Sequence[BroadcastCamera], x0: float, y0: float, vx: float, vy: float,
                bw: int, bh: int, pitch: PitchModel) -> np.ndarray:
     """Per-frame pixel box (x1, y1, x2, y2) of an actor, NaN when out of frame."""

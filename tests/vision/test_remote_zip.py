@@ -173,3 +173,26 @@ def test_retries_are_reported_through_the_log_callback(monkeypatch):
     fetch, _ = rz.http_range_fetcher("https://example.invalid/z.zip", log=lines.append)
     assert fetch(10, 20) == blob[10:20]
     assert len(lines) == 1 and "retry 1/4" in lines[0] and "429" in lines[0]
+
+
+def test_a_body_cut_short_is_retried(monkeypatch):
+    import http.client
+
+    blob = bytes(range(100))
+    state = {"cut": False}
+
+    class _Cut(_FakeResponse):
+        def read(self):
+            raise http.client.IncompleteRead(b"partial", 50)
+
+    def flaky(req, timeout=None):
+        s, e = (int(v) for v in req.headers["Range"].split("=")[1].split("-"))
+        if s == 20 and not state["cut"]:
+            state["cut"] = True
+            return _Cut(b"", s, e, len(blob))
+        return _FakeResponse(blob[s:e + 1], s, e, len(blob))
+
+    monkeypatch.setattr(rz.urllib.request, "urlopen", flaky)
+    monkeypatch.setattr(rz.time, "sleep", lambda s: None)
+    fetch, _ = rz.http_range_fetcher("https://example.invalid/z.zip")
+    assert fetch(20, 90) == blob[20:90] and state["cut"]

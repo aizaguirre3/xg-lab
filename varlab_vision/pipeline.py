@@ -27,11 +27,12 @@ Pitch coordinates come from one of two sources: a static ``PitchProjector``
 ``FrameCalibrator`` from ``calibration.py`` that finds the markings (fed through
 ``push`` / ``flush``, so its frame stride applies: during steady tracking most
 frames are interpolated between fitted ones; each frame's person detections go
-with it and are left out of the marking mask). With a calibrator each object also
+with it and are left out of the marking mask; at the end of the clip its
+``bridge`` fills the gaps it can from the camera's measured motion). With a calibrator each object also
 carries ``pitch_x`` / ``pitch_y`` (metres, bottom-middle; null when the frame is
 uncalibrated), ``calib_error`` (the frame's RMS line-fit error in pixels; null
-when unknown, which includes every interpolated frame) and ``calib_status``
-(``calibrated`` / ``tracked`` / ``interpolated`` / ``uncalibrated``) in its extra keys, and every frame gets a ``camera`` annotation record
+when unknown, which includes every interpolated and bridged frame) and ``calib_status``
+(``calibrated`` / ``tracked`` / ``interpolated`` / ``bridged`` / ``uncalibrated``) in its extra keys, and every frame gets a ``camera`` annotation record
 (``calibration``: homography and diagnostics). ``bbox_pitch`` is null on every
 frame without a calibration and on any box whose projection is not finite, so
 the JSON never contains NaN or Infinity. ``has_labeled_camera`` on the image
@@ -730,9 +731,12 @@ class VisionPipeline:
             if progress is not None:
                 progress(k + 1, n)
 
-        if self.calibrator is not None:  # the frames the calibrator still holds back
+        if self.calibrator is not None:  # the frames the calibrator still holds back, then the gaps bridged
             t0 = time.perf_counter()
             calib.extend(self._calibrate(None))
+            bridge = getattr(self.calibrator, "bridge", None)
+            if bridge is not None:
+                calib = bridge(calib)
             timers["calib"].add(time.perf_counter() - t0, 0)
 
         # Team assignment over the whole clip.
@@ -847,7 +851,7 @@ def _calibration_summary(calib: Sequence[Optional["CalibrationResult"]]) -> Dict
     res = [r for r in calib if r is not None]
     if not res:
         return {}
-    ok = [r for r in res if r.ok and r.status != "interpolated"]  # the fitted frames: errors and inliers are theirs
+    ok = [r for r in res if r.ok and r.status not in ("interpolated", "bridged")]  # the fitted frames: errors and inliers are theirs
     fit = [r.fit_error_px for r in ok if not math.isnan(r.fit_error_px)]
     rep = [r.reprojection_error_m for r in ok if not math.isnan(r.reprojection_error_m)]
     return {
@@ -855,6 +859,7 @@ def _calibration_summary(calib: Sequence[Optional["CalibrationResult"]]) -> Dict
         "calibrated": sum(1 for r in res if r.status == "calibrated"),
         "tracked": sum(1 for r in res if r.status == "tracked"),
         "interpolated": sum(1 for r in res if r.status == "interpolated"),
+        "bridged": sum(1 for r in res if r.status == "bridged"),
         "uncalibrated": sum(1 for r in res if not r.ok),
         "shot_cuts": sum(1 for r in res if r.shot_cut),
         "fit_error_px_mean": (round(float(np.mean(fit)), 3) if fit else None),

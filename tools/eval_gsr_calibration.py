@@ -27,7 +27,10 @@ Headline numbers in the summary:
 
 ``--tracked`` feeds a clip's sampled frames in order through a ``FrameCalibrator`` (tracking, the
 filter and the frame stride, as the pipeline does) instead of calibrating each from scratch;
-use it with ``--every 1`` on a few clips.
+use it with ``--every 1`` on a few clips. The results are then bridged (``calibration.bridge_gaps``,
+off with ``--no-bridge``); the summary also gives the numbers before bridging under ``unbridged``,
+and ``--save-results`` keeps the raw results so the bridging can be re-scored without calibrating
+again. ``--frames`` reads whole clips already extracted to a local folder instead of the remote zip.
 
 Labels are read from ``--labels/<clip>/Labels-GameState.json`` when present (fetch them
 once with ``varlab_vision.remote_zip.extract_clip(..., labels_only=True)``),
@@ -103,23 +106,37 @@ def _errors_row(res, gt: np.ndarray, seconds: float) -> dict:
     return out
 
 
-def _work_tracked(frames: list) -> list:
-    """One clip in order through a FrameCalibrator: ``frames`` is [(jpeg, gt, use_boxes), ...]."""
+def _work_tracked(frames: list) -> tuple:
+    """One clip in order through a FrameCalibrator: ``frames`` is [(jpeg, gt, use_boxes), ...].
+
+    Returns the per-frame results (without their marking lists, so they pickle small) and the
+    seconds each took; the caller scores them, with and without bridging.
+    """
     import cv2
 
     fc = cal.FrameCalibrator()
-    gts, out, t_prev = [], [], time.perf_counter()
+    results, seconds, t_prev = [], [], time.perf_counter()
     for jpeg, gt, use_boxes in frames:
         img = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
         boxes = np.stack([gt[:, 0], gt[:, 1], gt[:, 0] + gt[:, 2], gt[:, 1] + gt[:, 3]], axis=1) if len(gt) else None
-        gts.append(gt)
         for res in fc.push(img, person_boxes=boxes if use_boxes else None):
             now = time.perf_counter()
-            out.append(_errors_row(res, gts[len(out)], now - t_prev))
+            results.append(res)
+            seconds.append(now - t_prev)
             t_prev = now
     for res in fc.flush():
-        out.append(_errors_row(res, gts[len(out)], 0.0))
-    return out
+        results.append(res)
+        seconds.append(0.0)
+    for r in results:
+        r.lines, r.ellipses = [], []
+    return results, seconds, fc._size
+
+
+def tracked_rows(results: list, seconds: list, gts: list, size, bridge_kw: dict | None) -> list:
+    """Per-frame rows for one clip's tracked results, bridged first unless ``bridge_kw`` is None."""
+    if bridge_kw is not None and size is not None:
+        results = cal.bridge_gaps(results, size[0], size[1], **bridge_kw)
+    return [_errors_row(r, g, s) for r, g, s in zip(results, gts, seconds)]
 
 
 def summary_of(rows: list, n_labelled_total: int) -> dict:
@@ -161,25 +178,49 @@ def main(argv=None) -> int:
     ap.add_argument("--workers", type=int, default=1, help="processes for the calibration (frames are read first)")
     ap.add_argument("--frame-cache", default=None, help="folder to keep the read JPEGs in (gitignored data/...)")
     ap.add_argument("--tracked", action="store_true", help="each clip in order through a FrameCalibrator")
+    ap.add_argument("--frames", default=None,
+                    help="folder of whole clips already extracted (<clip>/img1/*.jpg and labels); no network")
+    ap.add_argument("--no-bridge", action="store_true", help="tracked: score the results without bridge_gaps")
+    ap.add_argument("--bridge-agree-m", type=float, default=1.0)
+    ap.add_argument("--bridge-one-sided", type=int, default=5)
+    ap.add_argument("--bridge-max-gap", type=int, default=250)
+    ap.add_argument("--save-results", default=None, help="tracked: pickle the raw results here to re-score later")
     ap.add_argument("--out", required=True)
     args = ap.parse_args(argv)
 
-    url = hf_dataset_file_url(args.dataset, f"{args.split}.zip", args.revision)
-    zf, rf = open_remote_zip(url, block_size=1 << 20, max_blocks=2)  # sparse reads: small blocks
-    index = clip_index(zf)
-    names = {i.filename for i in zf.infolist()}
-    clips = args.clips or list(index)
+    local = Path(args.frames) if args.frames else None
+    if local is not None:
+        zf = rf = index = None
+        names = set()
+        clips = args.clips or sorted(p.name for p in local.iterdir() if (p / LABELS_FILE).is_file())
+    else:
+        url = hf_dataset_file_url(args.dataset, f"{args.split}.zip", args.revision)
+        zf, rf = open_remote_zip(url, block_size=1 << 20, max_blocks=2)  # sparse reads: small blocks
+        index = clip_index(zf)
+        names = {i.filename for i in zf.infolist()}
+        clips = args.clips or list(index)
     cache = Path(args.frame_cache) if args.frame_cache else None
     t_start = time.time()
     jobs, keys, n_labelled = [], [], {}
     for clip in clips:
-        lab = Path(args.labels) / clip / LABELS_FILE if args.labels else None
+        lab = (local / clip / LABELS_FILE if local is not None
+               else Path(args.labels) / clip / LABELS_FILE if args.labels else None)
         if lab is None or not lab.is_file():
             lab = extract_clip(zf, clip, Path(args.out).parent / "_labels", labels_only=True, index=index) / LABELS_FILE
         gt_clip = read_gsr_clip(lab)
         df = objects_frame(gt_clip)
         df = df[df["role"].isin(PERSON_ROLES)]
         for fi in range(1, gt_clip.info.seq_length + 1, args.every):
+            if local is not None:
+                path = local / clip / "img1" / f"{fi:06d}.jpg"
+                if not path.is_file():
+                    continue
+                jpeg = path.read_bytes()
+                g = df[df["frame"] == fi][["x", "y", "w", "h", "x_pitch", "y_pitch"]].to_numpy(float)
+                jobs.append((jpeg, g, args.person_mask == "labels"))
+                keys.append((clip, fi))
+                n_labelled[clip] = n_labelled.get(clip, 0) + len(g)
+                continue
             member = f"{index[clip]}img1/{fi:06d}.jpg"
             if member not in names:
                 continue
@@ -212,8 +253,24 @@ def main(argv=None) -> int:
             results = pool.map(fn, work, chunksize=chunk)
     else:
         results = [fn(j) for j in work]
+    extra: dict = {}
     if args.tracked:
-        results = [r for clip_rows in results for r in clip_rows]
+        gts = {}
+        for (clip, _fi), (_j, g, _b) in zip(keys, jobs):
+            gts.setdefault(clip, []).append(g)
+        raw = dict(zip(by_clip, results))
+        if args.save_results:
+            import pickle
+
+            Path(args.save_results).parent.mkdir(parents=True, exist_ok=True)
+            with open(args.save_results, "wb") as fh:
+                pickle.dump({"raw": raw, "gts": gts, "n_labelled": n_labelled}, fh)
+        bridge_kw = None if args.no_bridge else {"agree_m": args.bridge_agree_m, "one_sided_max": args.bridge_one_sided,
+                                                 "max_gap": args.bridge_max_gap}
+        unbridged = [r for clip, (res, sec, size) in raw.items() for r in tracked_rows(res, sec, gts[clip], size, None)]
+        extra["unbridged"] = summary_of(unbridged, sum(n_labelled.values()))
+        results = [r for clip, (res, sec, size) in raw.items() for r in tracked_rows(res, sec, gts[clip], size, bridge_kw)]
+        extra["bridge"] = bridge_kw
     per_clip: dict = {}
     for (clip, fi), r, (_j, g, _b) in zip(keys, results, jobs):
         r["frame"] = fi
@@ -230,8 +287,9 @@ def main(argv=None) -> int:
                "mode": "tracked (FrameCalibrator, frame stride)" if args.tracked else "each frame from scratch",
                "person_mask": ("labelled person boxes (stand-in for the detector's)" if args.person_mask == "labels"
                                else "none"),
-               **summary_of(results, sum(n_labelled.values())),
-               "network_mb": round(rf.bytes_fetched / 1e6, 1), "wall_seconds": round(time.time() - t_start, 1)}
+               **summary_of(results, sum(n_labelled.values())), **extra,
+               "network_mb": round(rf.bytes_fetched / 1e6, 1) if rf is not None else 0.0,
+               "wall_seconds": round(time.time() - t_start, 1)}
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     Path(args.out).write_text(json.dumps({"summary": summary, "per_clip": per_clip}, indent=1))
     print(json.dumps(summary, indent=1))

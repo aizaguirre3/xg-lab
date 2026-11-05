@@ -42,7 +42,13 @@ PnLCalib (GPL-2) or TrackLab / sn-gamestate (GPL-3). The chain is
    followed without lag while fit noise is averaged on a static shot. With ``push`` /
    ``flush`` a frame stride applies: during steady tracking only about one frame in six is
    fitted and the frames between are interpolated between fits (status ``interpolated``),
-   each one checked against its own markings (see ``DEFAULT_FRAME_STRIDE``).
+   each one checked against its own markings (see ``DEFAULT_FRAME_STRIDE``). It also
+   measures the camera's motion from each frame to the next from the whole image
+   (``registration.py``) and attaches it to the frame's result.
+8. ``bridge_gaps``: after the clip, the frames the markings could not calibrate are carried
+   from the calibrated frames around them through those motions (status ``bridged``), only
+   where the chains carried in from both sides agree on the pitch (see the comment above
+   ``bridge_gaps``).
 
 A frame is **calibrated** only when enough markings match (two lines of each family, or
 a circle with a line of each) *and* the solution passes verification; anything else is
@@ -59,7 +65,9 @@ broadcast main camera on the ``+y`` side (the verification's camera prior), and 
 that shows enough markings. On every 50th frame of the 58 SoccerNet GSR validation clips
 (``tools/eval_gsr_calibration.py``, numbers in ``analysis/vision_env.md``) it claims 40% of
 the frames, 97% of those with a median error under 1 m against the labels and none over
-5 m, and refuses the rest.
+5 m, and refuses the rest. Run as the pipeline runs it (tracked, every frame) on nine of those
+clips it claims 51.0%, and with ``bridge_gaps`` 71.6% (precision 96.3%, 3 frames over 5 m either
+way), placing 67.4% of the labelled people within 1 m against 50.5% without.
 """
 from __future__ import annotations
 
@@ -71,11 +79,14 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from .pitch_model import DEFAULT_PITCH, X_CONST, Y_CONST, ModelLine, PitchModel
+from .registration import FrameRegistrar, Motion
 
 STATUS_CALIBRATED = "calibrated"
 STATUS_TRACKED = "tracked"
 STATUS_INTERPOLATED = "interpolated"  # held back by the frame stride: interpolated between fits, no line fit
+STATUS_BRIDGED = "bridged"  # no usable line fit: carried from calibrated frames through the camera's motion
 STATUS_UNCALIBRATED = "uncalibrated"
+CLAIMED_STATUSES = (STATUS_CALIBRATED, STATUS_TRACKED, STATUS_INTERPOLATED, STATUS_BRIDGED)
 
 
 # ----------------------------------------------------------------------------
@@ -137,10 +148,13 @@ class CalibrationResult:
     ellipses: List["ImageEllipse"] = field(default_factory=list, repr=False, compare=False)
     arc_matches: List["ArcMatch"] = field(default_factory=list)
     verify: Dict[str, object] = field(default_factory=dict)  # see verify_solution; on a refused frame, why
+    # the camera's motion from the previous frame to this one (FrameCalibrator only; None on the
+    # first frame of a clip), what bridge_gaps chains
+    motion: Optional[Motion] = field(default=None, repr=False, compare=False)
 
     @property
     def ok(self) -> bool:
-        return self.status in (STATUS_CALIBRATED, STATUS_TRACKED, STATUS_INTERPOLATED) and self.h_px2m is not None
+        return self.status in CLAIMED_STATUSES and self.h_px2m is not None
 
     @property
     def n_inliers(self) -> int:
@@ -2292,6 +2306,11 @@ class FrameCalibrator:
     :func:`marking_alignment` (``align_tol_px``, ``support_keep``); otherwise they are fitted.
     ``n_replayed`` counts the held frames that had to be fitted. ``frame_stride=1`` makes
     ``push`` fit every frame.
+
+    With ``register`` (the default) every frame's result carries ``motion``, the camera's
+    motion from the previous frame measured by a :class:`~varlab_vision.registration.FrameRegistrar`
+    (about 9 ms per 1080p frame on the Mac); ``bridge(results)`` then runs :func:`bridge_gaps`
+    over the clip's results.
     """
 
     name = "line-calibration"
@@ -2300,7 +2319,7 @@ class FrameCalibrator:
                  hold_frames: int = 5, min_inliers: int = 4, hist_threshold: float = CUT_HIST_THRESHOLD,
                  guard_px: Optional[float] = None, track_keep: float = 0.6, frame_stride: int = DEFAULT_FRAME_STRIDE,
                  steady_frames: int = 2, hold_tol_px: Optional[float] = None, close_tol_px: Optional[float] = None,
-                 align_tol_px: float = 0.05, support_keep: float = 0.8, **calibrate_kw):
+                 align_tol_px: float = 0.05, support_keep: float = 0.8, register: bool = True, **calibrate_kw):
         self.model = model
         self.cut_threshold = cut_threshold
         self.hist_threshold = hist_threshold
@@ -2316,6 +2335,7 @@ class FrameCalibrator:
         self.align_tol_px = align_tol_px
         self.support_keep = support_keep
         self.calibrate_kw = calibrate_kw
+        self._registrar = FrameRegistrar() if register else None
         self._samples, self._sample_line = marking_samples(model)
         self._model_abc = np.stack([ln.homogeneous for ln in model.lines()], axis=0)
         self.reset()
@@ -2344,6 +2364,10 @@ class FrameCalibrator:
         self.last_shift_px: float = float("nan")
         self.last_prior_shift_px: float = float("nan")  # distance of the last fit from the prior it was tracked from
         self.n_replayed = 0  # held frames refitted one by one because their stretch did not close cleanly
+        self._motions: Dict[int, Optional[Motion]] = {}  # measured motion into each frame not returned yet
+        self._emitted = 0  # results returned since the reset (they come back in frame order)
+        if self._registrar is not None:
+            self._registrar.reset()
 
     @property
     def n_pending(self) -> int:
@@ -2567,8 +2591,11 @@ class FrameCalibrator:
         self._boxes = {n: b for n, b in self._boxes.items() if n > self._frame_no - 2 * self.frame_stride - 2}
         if person_boxes is not None:
             self._boxes[self._frame_no] = np.asarray(person_boxes, float).reshape(-1, 4)
+        if self._registrar is not None:
+            self._motions[self._frame_no] = self._registrar.push(frame_bgr, self._boxes.get(self._frame_no))
+        done: List[CalibrationResult] = []
         if cut:
-            out += self._close_open_stretch()
+            done = self._close_open_stretch()
             self._drop_track()
             self._missed = 0
         elif self._may_hold():
@@ -2578,11 +2605,24 @@ class FrameCalibrator:
                 self._snapshot["_history_len"] = len(self.history)
             self._pending.append((self._frame_no, frame_bgr))
             return out
-        return out + self._close_with(frame_bgr, cut)
+        return out + self._stamp(done + self._close_with(frame_bgr, cut))
+
+    def _stamp(self, results: List[CalibrationResult]) -> List[CalibrationResult]:
+        """Attach to each returned result the motion measured into its frame."""
+        for r in results:
+            self._emitted += 1
+            r.motion = self._motions.pop(self._emitted, None)
+        return results
 
     def flush(self) -> List[CalibrationResult]:
         """Results for the frames still held back (call once at the end of a clip)."""
-        return self._close_open_stretch()
+        return self._stamp(self._close_open_stretch())
+
+    def bridge(self, results: Sequence[CalibrationResult], **kw) -> List[CalibrationResult]:
+        """:func:`bridge_gaps` over a whole clip's results (from ``push`` / ``flush`` or ``update``)."""
+        if self._size is None:
+            return list(results)
+        return bridge_gaps(results, self._size[0], self._size[1], self.model, **kw)
 
     def update(self, frame_bgr: np.ndarray, person_boxes: Optional[np.ndarray] = None) -> CalibrationResult:
         """One frame in, its result out: fits every frame (the frame stride is ``push``'s)."""
@@ -2600,3 +2640,113 @@ class FrameCalibrator:
         if self._prior is None:
             return np.full((len(pts), 2), np.nan)
         return apply_homography(np.linalg.inv(self._prior), pts)
+
+
+# Bridging. A frame the markings could not calibrate (too few lines, or a fit refused as too
+# uncertain) can still be placed from the frames around it: the camera's motion from frame to
+# frame, measured from the whole image (registration.py), carries a calibrated frame's
+# homography forward and back. On the SoccerNet GSR train clips SNGS-060 and SNGS-099, against
+# homographies fitted to the labelled feet of frames with 14 or more people, the chained motion
+# drifts by a median 0.15 to 0.19 m over 5 frames, 0.29 to 0.31 m over 25, 0.33 to 0.41 m over
+# 50 and 0.46 to 0.76 m over 100 (worst 1.0 m at 25 frames, 3.9 m at 100). So a gap is bridged
+# from both ends: on every frame of the gap the chain carried forward from the fit before it and
+# the chain carried back from the fit after it must put the same pixels within ``agree_m`` of
+# each other on the pitch (:func:`homography_shift_m`), which checks both fits and both chains
+# at once, and each frame is blended between the two chains, so the drift is pinned at both
+# ends. The check is in metres on the gap's own frames, not in pixels on a fitted frame: a fit
+# of a zoomed-in view is only accurate over what it sees, and carried out to a wide view its
+# error looks many times larger than it is where the gap is. A gap open at one end (the start or
+# the end of a shot, or a failed motion) is bridged for at most ``one_sided_max`` frames, with
+# nothing to check it against. A shot cut or a failed motion breaks every chain through it.
+#
+# The defaults were chosen on train clips SNGS-060, 064, 072, 099 and 103 (every frame, tracked,
+# labelled person boxes as the people mask): bridging lifts the claimed frames from 51.0% to 66.9%
+# and the labelled people placed within 1 m from 45.6% to 59.3%, with the precision of the claim
+# (median error under 1 m) going from 99.3% to 98.8%. The two-sided bridges that miss (16 of 585)
+# sit between fits that were themselves off; agree_m 0.5 m bridges a quarter fewer frames and misses
+# almost as many (15). One-sided bridges were all right up to 5 frames, but 5 of the next 22 missed.
+
+
+def homography_shift_m(h_a_m2px: np.ndarray, h_b_m2px: np.ndarray, width: int, height: int) -> float:
+    """How far apart on the pitch, in metres, two metre -> pixel maps put the same pixels: the
+    largest distance over the anchor pixels of :func:`homography_shift_px`."""
+    anchors = np.array([[0.25 * width, 0.6 * height], [0.75 * width, 0.6 * height],
+                        [0.2 * width, 0.9 * height], [0.8 * width, 0.9 * height]])
+    try:
+        d = np.linalg.norm(apply_homography(np.linalg.inv(h_a_m2px), anchors)
+                           - apply_homography(np.linalg.inv(h_b_m2px), anchors), axis=1).max()
+    except np.linalg.LinAlgError:
+        return float("inf")
+    return float(d) if np.isfinite(d) else float("inf")
+
+
+def bridge_gaps(results: Sequence[CalibrationResult], width: int, height: int, model: PitchModel = DEFAULT_PITCH,
+                max_gap: int = 250, one_sided_max: int = 5, agree_m: float = 1.0) -> List[CalibrationResult]:
+    """The clip's results with the uncalibrated frames that the camera's motion links to calibrated
+    frames replaced by bridged ones (status ``bridged``); everything else is returned as it is.
+
+    ``results[i].motion`` is the motion into frame ``i`` from frame ``i - 1``; a missing or failed
+    motion, or ``shot_cut`` on frame ``i``, means frame ``i`` is not linked to the frame before.
+    Gaps longer than ``max_gap`` frames are left alone.
+    """
+    out = list(results)
+    n = len(out)
+    anchor = [r.ok for r in out]
+
+    def linked(i: int) -> bool:
+        r = out[i]
+        return 0 < i < n and not r.shot_cut and r.motion is not None and r.motion.ok
+
+    def bridged(i: int, h_m2px: np.ndarray, note: str) -> CalibrationResult:
+        r = results[i]
+        h = h_m2px / h_m2px[2, 2]
+        h_inv = np.linalg.inv(h)
+        return CalibrationResult(status=STATUS_BRIDGED, h_m2px=h, h_px2m=h_inv / h_inv[2, 2], n_lines=r.n_lines,
+                                 shot_cut=r.shot_cut, motion=r.motion, verify=r.verify,
+                                 note=f"{note}; line fit: {r.note}"[:400])
+
+    i = 0
+    while i < n:
+        if anchor[i]:
+            i += 1
+            continue
+        j = i
+        while j < n and not anchor[j]:
+            j += 1
+        a, b = i - 1, j  # the calibrated frames around the gap i..j-1, when they exist (a >= 0, b < n)
+        i = j
+        if j - (a + 1) > max_gap:
+            continue
+        fwd: Dict[int, np.ndarray] = {}
+        if a >= 0:
+            h = out[a].h_m2px
+            for k in range(a + 1, min(b + 1, n)):
+                if not linked(k):
+                    break
+                h = out[k].motion.h @ h
+                fwd[k] = h / h[2, 2]
+        bwd: Dict[int, np.ndarray] = {}
+        if b < n:
+            h = out[b].h_m2px
+            for k in range(b - 1, a, -1):
+                if not linked(k + 1):
+                    break
+                h = np.linalg.inv(out[k + 1].motion.h) @ h
+                bwd[k] = h / h[2, 2]
+        if b < n and b in fwd:  # linked across the whole gap: the two chains must agree on every frame, then blend
+            gap = max(homography_shift_m(fwd[k], bwd[k], width, height) for k in range(a + 1, b))
+            if gap > agree_m:
+                continue
+            for k in range(a + 1, b):
+                t = (k - a) / float(b - a)
+                p = (1.0 - t) * _h_to_params(fwd[k], width, height, model) + t * _h_to_params(bwd[k], width, height, model)
+                out[k] = bridged(k, _params_to_h(p, width, height, model),
+                                 f"bridged between frames {a + 1} and {b + 1} (the chains agree within {gap:.2f} m)")
+            continue
+        for k, h in fwd.items():  # open at one end, or broken inside: as far as each chain reaches, capped
+            if k < b and k - a <= one_sided_max:
+                out[k] = bridged(k, h, f"bridged forward from frame {a + 1} ({k - a} frames, unchecked)")
+        for k, h in bwd.items():
+            if b - k <= one_sided_max and out[k].status != STATUS_BRIDGED:
+                out[k] = bridged(k, h, f"bridged back from frame {b + 1} ({b - k} frames, unchecked)")
+    return out
