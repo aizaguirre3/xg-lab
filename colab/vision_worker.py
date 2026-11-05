@@ -83,7 +83,8 @@ def _check_numpy_consistent() -> None:
 def setup(ref: str, repo: str = "https://github.com/aizaguirre3/xg-lab.git", detector_size: str = "medium",
           with_pose: bool = True, hf_dataset: str = "SoccerNet/SN-GSR-2025", hf_revision: str = "main",
           clip_pattern: str = "{split}/{clip}/*", device: str | None = None, install: bool = False,
-          gpu_onnxruntime: bool = True, with_calibration: bool = True, hf_layout: str = "zip") -> dict:
+          gpu_onnxruntime: bool = True, with_calibration: bool = True, hf_layout: str = "zip",
+          pipeline_kw: dict | None = None, cache: bool = False) -> dict:
     """Clone at ``ref``, (optionally) install the pinned requirements, load the models. Idempotent per kernel.
 
     ``install=False`` because colab/run_clips.py installs with ``colab install`` and
@@ -127,12 +128,13 @@ def setup(ref: str, repo: str = "https://github.com/aizaguirre3/xg-lab.git", det
         except Exception:  # noqa: BLE001
             pose_dev = "cpu"
     _STATE["pipeline"] = production_pipeline(detector_size=detector_size, device=dev, with_pose=with_pose,
-                                             pose_device=pose_dev, with_calibration=with_calibration)
+                                             pose_device=pose_dev, with_calibration=with_calibration,
+                                             **(pipeline_kw or {}))
     if hf_layout not in ("zip", "folders"):
         raise ValueError(f"hf_layout must be 'zip' or 'folders', got {hf_layout!r}")
     _STATE.update({"head": head, "hf_dataset": hf_dataset, "hf_revision": hf_revision, "clip_pattern": clip_pattern,
                    "device": dev, "pose_device": pose_dev, "with_calibration": with_calibration,
-                   "hf_layout": hf_layout})
+                   "hf_layout": hf_layout, "cache": cache})
     info = {"head": head, "device": dev, "pose_device": pose_dev, "with_calibration": with_calibration,
             "setup_seconds": round(time.time() - t0, 1), "backends": _STATE["pipeline"].backends()}
     print("setup", json.dumps(info))
@@ -233,7 +235,8 @@ def _process_clip(clip: str, split: str, local_root: str | None, delete_frames: 
     out_dir = OUT_DIR / split / clip
     out_dir.mkdir(parents=True, exist_ok=True)
     report = pipe.run_clip(clip_dir, out_dir / LABELS_FILE, clip_name=clip, game_id=(info.game_id if info else ""),
-                           frames=seq, progress=lambda i, n: print(f"  {clip} {i}/{n}", flush=True) if i % 100 == 0 else None)
+                           frames=seq, progress=lambda i, n: print(f"  {clip} {i}/{n}", flush=True) if i % 100 == 0 else None,
+                           cache_path=(out_dir / "cache.pkl") if _STATE.get("cache") else None)
     rep = report.as_dict()
     rep["head"] = _STATE.get("head"); rep["wall_seconds"] = round(time.time() - t0, 1)
     rep["download"] = _STATE.get("last_fetch")

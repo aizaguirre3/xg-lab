@@ -204,6 +204,16 @@ def test_the_runner_enforces_its_own_wall_clock_limit(monkeypatch):
     assert time.monotonic() - t0 < 10
 
 
+def test_pipeline_keywords_point_at_the_uploaded_weights():
+    rc = load_module("run_clips")
+    kw = rc.pipeline_keywords('{"detector_weights": "@det.pth", "detector_classes": {"1": "player", "4": "ball"}, '
+                              '"stitch": true}', ["det.pth=data/models/detector/best.pth"])
+    assert kw == {"detector_weights": "/content/weights/det.pth", "detector_classes": {1: "player", 4: "ball"},
+                  "stitch": True}
+    with pytest.raises(SystemExit):
+        rc.pipeline_keywords('{"jersey_weights": "@missing.pt"}', [])
+
+
 def test_exec_checked_fails_on_a_traceback_in_the_output():
     rc = load_module("run_clips")
 
@@ -216,3 +226,25 @@ def test_exec_checked_fails_on_a_traceback_in_the_output():
     assert s.exec_checked("print(1)", 10).stdout == "fine"
     with pytest.raises(RuntimeError, match="raised on the VM"):
         s.exec_checked("boom()", 10)
+
+
+def test_upload_large_sends_parts_and_joins_them_with_a_checksum(tmp_path):
+    rc = load_module("run_clips")
+    calls = []
+
+    def runner(cmd, stdin_text=None):
+        calls.append((cmd[1], cmd[-1] if cmd[1] == "upload" else None, stdin_text))
+        return rc.CmdResult(0, "joined", "")
+
+    big = tmp_path / "w.pth"
+    big.write_bytes(bytes(range(256)) * 4096)  # 1 MiB
+    s = rc.ColabSession("x", "L4", runner)
+    s.upload_large(big, "/content/weights/w.pth", chunk_mb=0.3)
+    uploads = [c for c in calls if c[0] == "upload"]
+    assert [u[1] for u in uploads] == [f"/content/weights/w.pth.part{k:03d}" for k in range(4)]
+    join = [c for c in calls if c[0] == "exec"][0][2]
+    import hashlib
+    assert hashlib.sha256(big.read_bytes()).hexdigest() in join and "os.remove(p)" in join
+    calls.clear()
+    s.upload_large(big, "/content/weights/w.pth", chunk_mb=2)  # small enough: one plain upload
+    assert [c[0] for c in calls] == ["upload"]
